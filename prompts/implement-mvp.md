@@ -11,10 +11,11 @@
 
 请严格阅读：
 - AGENTS.md
-- docs/phase-plan.md
-- docs/mvp-spec.md
-- docs/api.md
-- docs/architecture.md
+- docs/00_README.md
+- docs/06_phase_plan.md
+- docs/01_product_spec.md
+- docs/03_api.md
+- docs/02_architecture.md
 
 Phase 1 只实现最小可运行闭环：
 1. Tauri 2 应用可启动。

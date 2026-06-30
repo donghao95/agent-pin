@@ -1,6 +1,10 @@
-# Agent Pin MVP 分期计划
+# Agent Pin 分期计划与验收
 
-本文件记录当前最新执行口径。若与 `docs/mvp-spec.md` 早期描述存在差异，以本文件为准。
+版本：v0.1
+阶段：MVP（Phase 1 + Phase 2 已实现）
+状态：稳定
+
+本文件记录当前最新执行口径。若与早期文档描述存在差异，以本文件为准。
 
 ## Phase 1：最小闭环
 
@@ -37,7 +41,6 @@ Phase 1 托盘边界说明：
 
 - 托盘只负责应用生命周期（显示应用存活 + 退出应用）。
 - 托盘不负责 Pin 生命周期（不做历史列表、不做恢复、不做 hide-all）。
-- 未来如果支持"关闭后还能找回"，应通过独立的管理界面，而不是塞进托盘。
 - 关闭 Pin 窗口 = 销毁该窗口；托盘 Quit = 退出应用并停止 HTTP 服务。
 
 验收命令：
@@ -52,7 +55,7 @@ curl -X POST http://127.0.0.1:4317/api/pins \
 
 ## Phase 2：完整 MVP
 
-Phase 2 补齐完整 MVP 能力。拆分为 4 个子阶段，按顺序推进：
+Phase 2 补齐完整 MVP 能力。拆分为 4 个子阶段，按顺序推进。
 
 ### Phase 2-A：Block 扩展
 
@@ -71,7 +74,7 @@ Phase 2 补齐完整 MVP 能力。拆分为 4 个子阶段，按顺序推进：
 
 必须做：
 
-- 文件系统持久化（`~/.agent-pin/pins/` + `state.json`，见 `docs/architecture.md` §5）
+- 文件系统持久化（`~/.agent-pin/pins/` + `state.json`，见 `02_architecture.md` §5）
 - `GET /api/pins`
 - `POST /api/pins/{pinId}/show`
 - `POST /api/pins/{pinId}/hide`
@@ -87,7 +90,6 @@ Phase 2 补齐完整 MVP 能力。拆分为 4 个子阶段，按顺序推进：
 - 托盘右键菜单列最近 5 个 hidden Pin，点击快速重新打开（快恢）。
 - 独立管理界面窗口负责完整历史、搜索、删除（完整管理）。
 - 托盘只做应用存活 + 快恢入口 + 退出应用；Pin 完整生命周期管理走管理界面。
-- 此方案修正了早期文档"关闭后从托盘重新打开"的表述：托盘不是完整历史入口，只是快恢入口。
 
 关闭行为（Phase 2-B 实现口径）：
 
@@ -132,34 +134,33 @@ CLI 直接使用 Rust 实现，不再使用 Node.js MVP CLI。
 - 可以和 Tauri backend 复用类型、schema 和错误码。
 - 避免后续从 Node.js CLI 迁移到 Rust CLI。
 
-## 前端视觉口径
+## MVP 验收标准
 
-MVP 视觉目标：轻、克制、像桌面工具，不像网页后台或数据大屏。
+- 应用可以启动
+- 托盘可见
+- `GET /api/health` 返回 ok
+- `POST /api/pins` 创建独立 Pin 窗口
+- `agent-pin markdown` 创建 Markdown Pin
+- `agent-pin image` 创建 Image Pin
+- `agent-pin status` 创建 Status Pin
+- `agent-pin push --file` 创建混合 Pin
+- 多 Pin 不完全重叠
+- Pin 可以拖动、缩放、置顶、关闭
+- 关闭后应用不退出
+- 最近 Pin 可以从托盘快恢重新打开
+- 管理界面可查看完整历史、搜索、删除
+- 应用重启后历史仍在
+- 非法 JSON 不崩溃
+- 图片路径不存在时显示错误块
+- 端口被占用时启动弹窗 + 退出
+- 不包含 choice、事件回流、Artifact
 
-默认风格（MVP 长期目标）：
+## 后续路线
 
-- 浅色优先
-- 圆角卡片
-- 柔和阴影
-- 极简标题栏
-- 内容区域留白充足
-- Markdown 阅读体验优先
-- 图片展示干净
-- 可适度使用半透明或轻毛玻璃，但不能影响可读性
+`AGENTS.md` 明确不做 choice、事件回流、MCP、Artifact。以下路线只保留与该约束兼容的项：
 
-Phase 1 视觉退化（Windows WebView2 限制，详见 `docs/ui-style.md` §4）：
+- **v0.2**：透明度调节、锁定位置、边缘吸附、Pin 右键菜单（关闭/置顶切换/复制内容）
+- **v0.5**：HTTP 增强，更新/删除/查询 Pin 的更多能力
+- **v0.7**：手动 Pin、剪贴板 Pin、截图 Pin
 
-- CSS 不做圆角/阴影/毛玻璃（透明背景 + 圆角会露黑边，backdrop-filter 缩放抖动）
-- 窗口用 `shadow(true)` 让 DWM 提供 OS 级圆角+阴影（Win11 有，Win10 退化直角）
-- 移动/缩放时 WebView2 重绘延迟的边缘闪烁属已知限制，Phase 1 接受
-
-避免：
-
-- 深色控制台风
-- 厚重科技蓝
-- 大屏数据看板风
-- 复杂动画
-- 类网页 dashboard
-- 过度拟物
-
-Pin 应该像一个轻量桌面贴纸，而不是完整应用窗口。
+被 `AGENTS.md` 排除、不列入路线：choice pin（v0.3）、事件回流（v0.4）、MCP Server（v0.6）。

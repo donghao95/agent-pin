@@ -40,12 +40,14 @@ prompts/            # 给实现 Agent 的提示词
 
 遇到需求、实现、审查、修改时，优先查对应事实源，不要凭印象扩展。
 
-- 最新分期口径：`docs/phase-plan.md`
-- MVP 范围：`docs/mvp-spec.md`
-- 架构：`docs/architecture.md`
-- HTTP API：`docs/api.md`
-- CLI 行为：`docs/cli.md`
-- Skill 设计：`docs/skill-design.md`
+- 文档索引与冲突处理：`docs/00_README.md`
+- 最新分期口径与验收：`docs/06_phase_plan.md`
+- 产品规格（Pin JSON、Block、窗口/托盘行为）：`docs/01_product_spec.md`
+- 架构：`docs/02_architecture.md`
+- HTTP API：`docs/03_api.md`
+- CLI 行为：`docs/04_cli.md`
+- UI 风格：`docs/05_ui_style.md`
+- Skill 设计：`docs/07_skill_design.md`
 - 通用 skill：`skills/agent-pin/SKILL.md`
 - 示例 Pin：`examples/pins/`
 - 实现提示词：`prompts/implement-mvp.md`
@@ -54,10 +56,11 @@ prompts/            # 给实现 Agent 的提示词
 如果文档之间冲突：
 
 1. 先以 `AGENTS.md` 的边界约束为准。
-2. 再以 `docs/phase-plan.md` 的最新分期为准。
-3. 再以 `docs/mvp-spec.md` 的 MVP 范围为准。
-4. API、CLI、Skill 的细节分别以对应文档为准。
-5. 发现冲突时，应先指出冲突并修正文档，不要直接按自己的理解实现。
+2. 再以 `docs/00_README.md` 的冲突处理规则为准。
+3. 再以 `docs/06_phase_plan.md` 的最新分期为准。
+4. 再以 `docs/01_product_spec.md` 的产品规格为准。
+5. API、CLI、UI、Skill 的细节分别以对应文档为准。
+6. 发现冲突时，应先指出冲突并修正文档，不要直接按自己的理解实现。
 
 ---
 
@@ -297,7 +300,7 @@ Skill 应强调：什么时候应该 pin、什么时候不应该 pin、优先使
 未落地、正在讨论或包含未来路线判断的功能方案，不要写成 MVP 已实现事实。
 
 - 未来功能可以写入 `docs/roadmap.md` 或 `docs/product-notes.md`。
-- 不要把未来设想写进 `docs/mvp-spec.md` 的已实现范围。
+- 不要把未来设想写进 `docs/01_product_spec.md` 的已实现范围。
 - 功能实现完成并验收通过后，再把稳定事实合并进规格、API、CLI、架构和 skill 文档。
 
 ---

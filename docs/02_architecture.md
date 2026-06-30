@@ -287,7 +287,7 @@ MVP 视觉目标：轻、克制、像桌面工具，不像网页后台或数据�
 - 图片展示干净
 - 可适度使用半透明或轻毛玻璃，但不能影响可读性
 
-Phase 1 视觉退化（Windows WebView2 限制，详见 `docs/ui-style.md` §4）：
+Phase 1 视觉退化（Windows WebView2 限制，详见 `docs/05_ui_style.md` §4）：
 
 - CSS 不做圆角/阴影/毛玻璃（透明背景 + 圆角会露黑边，backdrop-filter 缩放抖动）
 - 窗口用 `WebviewWindowBuilder::shadow(true)` 让 DWM 提供 OS 级圆角+阴影（Win11 有，Win10 退化直角）

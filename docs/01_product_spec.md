@@ -1,8 +1,8 @@
-# Agent Pin MVP 规格文档
+# Agent Pin 产品规格
 
-版本：v0.1  
-阶段：MVP  
-状态：草案
+版本：v0.1
+阶段：MVP（Phase 1 + Phase 2 已实现）
+状态：稳定
 
 ## 1. 背景
 
@@ -55,7 +55,7 @@ MVP 只做 Agent → App 的纯展示，不做 User → Agent 的事件回流。
 - Tauri 2 桌面应用
 - 系统托盘
 - 本地 HTTP API，监听 `127.0.0.1:4317`
-- `agent-pin` CLI
+- `agent-pin` CLI（Rust 实现）
 - 一个 Pin 对应一个独立桌面窗口
 - Pin 支持 `markdown` / `image` / `status` blocks
 - 一个 Pin 可以包含多个 block
@@ -74,7 +74,7 @@ MVP 只做 Agent → App 的纯展示，不做 User → Agent 的事件回流。
 - 不做 Agent 自动继续执行
 - 不做完整 HTML Artifact
 - 不做网页分享
-- 不做结构化 table block
+- 不做结构化 table block（表格用 Markdown 表格表达）
 - 不做云同步和账号系统
 - 不做远程访问
 - 不做截图、OCR、录屏
@@ -82,34 +82,19 @@ MVP 只做 Agent → App 的纯展示，不做 User → Agent 的事件回流。
 - 不做 MCP Server
 - 不做复杂标签、分类、搜索
 - 不做实时 status 更新
+- 不做 WebSocket 实时通道
 
 ## 5. 技术路线
 
 - 桌面框架：Tauri 2
 - 前端：React + TypeScript
 - 后端：Rust / Tauri backend
-- CLI：MVP 可用 Node.js CLI，后续可迁移为 Rust CLI
+- CLI：Rust 实现（`packages/cli/`），底层调用本地 HTTP API
 - API：本地 HTTP 服务，默认 `http://127.0.0.1:4317`
 
-## 6. 架构
+HTTP 只监听 `127.0.0.1`，不开放局域网。
 
-```text
-Agent / Skill
-  ↓
-agent-pin CLI
-  ↓
-HTTP API: http://127.0.0.1:4317
-  ↓
-Tauri Rust Backend
-  ↓
-创建 Pin Window
-  ↓
-Web Frontend 渲染 Pin
-```
-
-MVP 不实现文件夹投递协议。Agent 优先用 CLI，CLI 不可用时直接调用 HTTP API。
-
-## 7. 核心概念
+## 6. 核心概念
 
 ### Pin
 
@@ -129,7 +114,7 @@ Block 是 Pin 中的内容块。MVP 支持：
 
 Source 表示 Pin 的来源 Agent、workspace 或任务。MVP 中 source 可选，不影响渲染。
 
-## 8. Pin JSON
+## 7. Pin JSON 结构
 
 基础结构：
 
@@ -204,7 +189,9 @@ export type PinSource = {
 }
 ```
 
-## 9. Block 规则
+PinDocument 是 API、CLI、窗口渲染之间的核心契约。修改 Pin JSON 结构时，必须同步更新：`03_api.md`、`04_cli.md`、`skills/agent-pin/SKILL.md`、`examples/pins/`。
+
+## 8. Block 规则
 
 ### Markdown Block
 
@@ -233,9 +220,9 @@ export type PinSource = {
 }
 ```
 
-支持：本地 PNG、JPG/JPEG、WebP；GIF 可选。
+支持：本地 PNG、JPG/JPEG、WebP、GIF。
 
-`path` 必须是绝对路径。相对路径解析在 Phase 2-C CLI 实现（CLI 把相对路径转绝对再 POST）。直接通过 HTTP 测试时需传绝对路径。
+`path` 必须是绝对路径。相对路径解析在 CLI 实现（CLI 把相对路径转绝对再 POST，见 `04_cli.md` §5/§7）。直接通过 HTTP 测试时需传绝对路径。
 
 图片路径不存在时，不应导致应用崩溃，应在 Pin 内显示错误块。
 
@@ -255,94 +242,7 @@ export type PinSource = {
 
 MVP 中 status 是静态展示，不做实时更新。
 
-## 10. HTTP API
-
-默认地址：
-
-```text
-http://127.0.0.1:4317
-```
-
-只监听本地回环地址，不开放局域网。
-
-### GET /api/health
-
-响应：
-
-```json
-{
-  "ok": true,
-  "app": "Agent Pin",
-  "version": "0.1.0"
-}
-```
-
-### POST /api/pins
-
-创建一个 Pin。
-
-成功响应：
-
-```json
-{
-  "ok": true,
-  "pinId": "pin_20260630_121530_pr_review"
-}
-```
-
-失败响应：
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "INVALID_PIN_DOCUMENT",
-    "message": "blocks must contain at least one block"
-  }
-}
-```
-
-### GET /api/pins
-
-列出最近 Pin。MVP 可简化。
-
-### POST /api/pins/{pinId}/show
-
-重新显示一个已隐藏 Pin。
-
-### POST /api/pins/{pinId}/hide
-
-隐藏一个 Pin。
-
-### POST /api/pins/hide-all
-
-隐藏全部 Pin。
-
-## 11. CLI
-
-CLI 名称：
-
-```text
-agent-pin
-```
-
-命令：
-
-```bash
-agent-pin health
-agent-pin markdown --title "PR 审查结果" --file ./review.md
-agent-pin markdown --title "结论" --text "第一版应该做成 Tauri 桌面 Pin。"
-agent-pin image --title "装修效果图" --path ./render.png --caption "入门柜参考图"
-agent-pin status --title "任务完成" --level success --text "审查完成：发现 2 个问题。"
-agent-pin push --file ./pin.json
-agent-pin list
-agent-pin show <pinId>
-agent-pin hide-all
-```
-
-Skill 应优先教 Agent 使用 CLI，而不是直接写 curl。
-
-## 12. 窗口行为
+## 9. 窗口行为
 
 每个 Pin 是一个独立窗口。
 
@@ -354,7 +254,7 @@ Skill 应优先教 Agent 使用 CLI，而不是直接写 curl。
 - 可关闭
 - 内容可滚动
 - 图片自动适配宽度
-- 关闭不删除数据
+- 关闭不删除数据（关闭 = hidden，可恢复）
 - 多个 Pin 级联排列，避免完全重叠
 
 默认尺寸：
@@ -367,13 +267,22 @@ Skill 应优先教 Agent 使用 CLI，而不是直接写 curl。
 }
 ```
 
-建议：
+约束：
 
 - 最小宽度：280
 - 默认宽度：420
 - 最大默认高度：屏幕高度的 70%
 
-## 13. 托盘行为
+窗口类型：
+
+- **Pin 窗口**（label 是 pinId）：`decorations(false)` + `shadow(true)` + 自定义轻标题栏 + `alwaysOnTop=true` + `skipTaskbar=true`
+- **管理界面窗口**（label 固定为 `manager`）：`decorations(true)` 系统装饰 + `resizable(true)` + 880×620 + min 640×400
+
+窗口 label（即 pinId）格式：`pin_<timestamp_ms>_<6位随机数字>`，例如 `pin_1782801843675_717272`。
+
+详细窗口管理设计见 `02_architecture.md` §4。
+
+## 10. 托盘行为
 
 应用启动后常驻系统托盘。
 
@@ -388,93 +297,28 @@ Skill 应优先教 Agent 使用 CLI，而不是直接写 curl。
 
 MVP 可以没有完整主窗口，只保留托盘、Pin 窗口和管理界面窗口。
 
-## 14. 本地存储
-
-MVP 不使用数据库，使用文件系统。
-
-目录：
-
-```text
-~/.agent-pin/           # Windows: %USERPROFILE%\.agent-pin\
-  pins/                 # 每个 Pin 的 PinDocument，文件名 {pinId}.json
-  state.json            # 所有 Pin 的元数据（PinMeta 列表）
-```
-
-`state.json` 记录所有 Pin 的元数据（pinId / title / createdAt / updatedAt / state / source）。`pins/{pinId}.json` 存储完整 PinDocument。
-
-写入策略：原子写（先写 `.tmp` 再 rename）。启动时 `load_from_disk` 读取，坏文件降级为空不阻塞启动。
-
-## 15. 错误处理
+## 11. 错误处理
 
 任何坏输入都不能导致应用崩溃。
 
-常见错误：
+错误码定义见 `03_api.md` §2。常见错误：
 
 - `INVALID_JSON`：JSON 解析失败或未知 block type（serde 反序列化阶段拒绝）
 - `INVALID_PIN_DOCUMENT`：version/title/blocks 非空/path 绝对路径/level 枚举校验失败
 - `UNSUPPORTED_BLOCK_TYPE`：保留，当前未知 type 走 `INVALID_JSON`
 - `IMAGE_NOT_FOUND`：保留，HTTP 层不校验文件存在性，前端 `<img>` onerror 兜底
 - `IMAGE_UNSUPPORTED`：图片扩展名非 PNG/JPG/JPEG/WebP/GIF
+- `PIN_NOT_FOUND`：show/hide/delete 路由中 pinId 不存在
 - `WINDOW_CREATE_FAILED`：窗口创建失败
 - `INTERNAL_ERROR`：内部错误
 
-统一错误响应：
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "ERROR_CODE",
-    "message": "Human readable message"
-  }
-}
-```
-
-## 16. 实现阶段
-
-> **已由 `docs/phase-plan.md` 取代。**
->
-> 本节保留的历史版本与最新分期口径不一致（历史版本把"系统托盘"放进 Phase 1，但最新口径把完整托盘能力放在 Phase 2，Phase 1 仅含最小托盘用于应用退出）。
->
-> 实际分期以 `docs/phase-plan.md` 为准。本节不再维护，仅作历史参考。
-
-## 17. 验收标准
-
-- 应用可以启动
-- 托盘可见
-- `GET /api/health` 返回 ok
-- `POST /api/pins` 创建独立 Pin 窗口
-- `agent-pin markdown` 创建 Markdown Pin
-- `agent-pin image` 创建 Image Pin
-- `agent-pin status` 创建 Status Pin
-- `agent-pin push --file` 创建混合 Pin
-- 多 Pin 不完全重叠
-- Pin 可以拖动、缩放、置顶、关闭
-- 关闭后应用不退出
-- 最近 Pin 可以从托盘重新打开
-- 非法 JSON 不崩溃
-- 图片路径不存在时显示错误
-- 不包含 choice、事件回流、Artifact
-
-## 18. 后续路线
-
-后续版本可考虑：
-
-- v0.2：透明度、锁定位置、边缘吸附、右键菜单
-- v0.3：Choice Pin，只记录本地事件
-- v0.4：事件回流，`agent-pin events`
-- v0.5：HTTP 增强，更新/删除/查询 Pin
-- v0.6：MCP Server
-- v0.7：手动 Pin、剪贴板 Pin、截图 Pin
-
-## 19. 关键原则
+## 12. 关键原则
 
 - 第一版只做纯展示
 - 一个 Pin 是一个独立桌面窗口
 - Pin 是容器，block 是内容
 - Agent 优先通过 CLI 使用
 - CLI 底层调用本地 HTTP
-- 文件夹投递只是兜底
 - 不要让 Agent 乱推 Pin
 - 不要把聊天记录全文 pin 到桌面
 - 每个 Pin 应该有明确用途

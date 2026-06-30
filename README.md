@@ -47,10 +47,15 @@ agent-pin/
 
 ## 关键文档
 
-- [MVP 规格文档](docs/mvp-spec.md)
-- [API 设计](docs/api.md)
-- [CLI 设计](docs/cli.md)
-- [Skill 设计](docs/skill-design.md)
+- [文档索引](docs/00_README.md)
+- [产品规格](docs/01_product_spec.md)
+- [架构](docs/02_architecture.md)
+- [HTTP API](docs/03_api.md)
+- [CLI](docs/04_cli.md)
+- [UI 风格](docs/05_ui_style.md)
+- [分期与验收](docs/06_phase_plan.md)
+- [Skill 设计](docs/07_skill_design.md)
+- [通用 skill（给外部 Agent）](skills/agent-pin/SKILL.md)
 - [实现 MVP 的提示词](prompts/implement-mvp.md)
 
 ## 最小目标
