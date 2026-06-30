@@ -27,6 +27,7 @@ Agent Pin 是一个本地桌面工具，让 Agent 可以把重要内容像 PixPi
 - ✅ 独立管理界面（搜索 / 删除）
 - ✅ 应用重启后历史保留
 - ✅ Agent Skill 文档
+- ✅ 更新检查（启动时静默检查 + 托盘菜单手动检查）
 
 明确不做：choice、点击事件回流、Artifact、MCP Server、云同步、远程访问、截图/OCR、复杂主题系统。
 
