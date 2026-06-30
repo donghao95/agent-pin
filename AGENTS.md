@@ -20,7 +20,7 @@ Agent Pin 是一个本地桌面工具，让 Agent 可以通过 CLI / HTTP 把重
 
 ```text
 apps/desktop/       # Tauri 桌面应用
-packages/cli/       # agent-pin CLI
+packages/cli/       # Rust agent-pin CLI
 packages/shared/    # Pin JSON 类型、schema、校验逻辑
 docs/               # 规格文档
 skills/agent-pin/   # 给外部 Agent 使用的通用 skill
@@ -33,7 +33,6 @@ prompts/            # 给实现 Agent 的提示词
 - `AGENTS.md`：给开发本项目的 Agent 使用。
 - `skills/agent-pin/SKILL.md`：给外部 Agent 使用 Agent Pin 产品的通用 skill。
 - 不要把开发约束写进 `skills/agent-pin/SKILL.md`。
-- 不要把产品使用 skill 写成某个工具私有目录的唯一版本。
 
 ---
 
@@ -41,6 +40,7 @@ prompts/            # 给实现 Agent 的提示词
 
 遇到需求、实现、审查、修改时，优先查对应事实源，不要凭印象扩展。
 
+- 最新分期口径：`docs/phase-plan.md`
 - MVP 范围：`docs/mvp-spec.md`
 - 架构：`docs/architecture.md`
 - HTTP API：`docs/api.md`
@@ -54,9 +54,10 @@ prompts/            # 给实现 Agent 的提示词
 如果文档之间冲突：
 
 1. 先以 `AGENTS.md` 的边界约束为准。
-2. 再以 `docs/mvp-spec.md` 的 MVP 范围为准。
-3. API、CLI、Skill 的细节分别以对应文档为准。
-4. 发现冲突时，应先指出冲突并修正文档，不要直接按自己的理解实现。
+2. 再以 `docs/phase-plan.md` 的最新分期为准。
+3. 再以 `docs/mvp-spec.md` 的 MVP 范围为准。
+4. API、CLI、Skill 的细节分别以对应文档为准。
+5. 发现冲突时，应先指出冲突并修正文档，不要直接按自己的理解实现。
 
 ---
 
@@ -76,14 +77,7 @@ prompts/            # 给实现 Agent 的提示词
 
 > Agent 可以把重要内容稳定、轻量、低打扰地贴到桌面上。
 
-因此，任何设计都不能为了“功能完整”而破坏：
-
-- 轻量
-- 本地优先
-- 纯展示 MVP
-- 一个 Pin 一个独立窗口
-- Agent 通过 CLI / HTTP 稳定调用
-- 不做 choice / 事件回流 / Artifact
+任何设计都不能为了“功能完整”而破坏：轻量、本地优先、纯展示 MVP、一个 Pin 一个独立窗口、Agent 通过 CLI / HTTP 稳定调用、不做 choice / 事件回流 / Artifact。
 
 ---
 
@@ -115,26 +109,58 @@ state 保存
 - 不要静默吞掉错误。
 - 不要让坏输入导致应用崩溃。
 - 图片路径不存在、JSON 无效、block 类型不支持等问题必须有明确错误返回或错误展示。
-- 如果需要兼容历史坏数据，必须说明原因、范围和验证方式。
 
 ---
 
-## MVP 范围
+## MVP 分期
+
+### Phase 1：最小闭环
+
+目标：先验证 HTTP 请求可以创建一个独立 Markdown Pin 窗口。
 
 必须做：
 
 - Tauri 2 桌面应用
-- 系统托盘
-- 本地 HTTP API，监听 `127.0.0.1:4317`
-- `agent-pin` CLI
-- 一个 Pin 一个独立窗口
-- 支持 `markdown` / `image` / `status` blocks
-- 一个 Pin 可以包含多个 block
-- Pin 窗口支持拖动、缩放、置顶、关闭
-- 最近 Pin 简单历史，关闭后可从托盘重新打开
+- 本地 HTTP 服务，监听 `127.0.0.1:4317`
+- `GET /api/health`
+- `POST /api/pins`
+- 接收 `markdown` block
+- 每个 Pin 是独立桌面窗口
+- Pin 窗口可拖动、缩放、置顶、关闭
 - 基础错误处理，坏输入不能导致应用崩溃
 
-明确不做：
+Phase 1 暂不做：
+
+- CLI
+- image block
+- status block
+- 多 block 混排
+- 最近 Pin 历史
+- 托盘恢复
+- `GET /api/pins`
+- `show` / `hide` / `hide-all`
+
+### Phase 2：完整 MVP
+
+必须做：
+
+- 系统托盘
+- Rust `agent-pin` CLI
+- `markdown` / `image` / `status` blocks
+- 一个 Pin 可以包含多个 block
+- 最近 Pin 简单历史
+- 关闭后可从托盘重新打开
+- `GET /api/pins`
+- `POST /api/pins/:pinId/show`
+- `POST /api/pins/:pinId/hide`
+- `POST /api/pins/hide-all`
+- Agent 使用 skill 文档
+
+历史能力属于完整 MVP：Pin 关闭后不能直接消失，必须保留记录并可恢复。
+
+---
+
+## 明确不做
 
 - 不做 choice
 - 不做点击事件回流
@@ -148,63 +174,47 @@ state 保存
 - 不做远程 token / 权限系统
 - 不做复杂主题系统
 
-如需讨论未来功能，写入 roadmap 或产品 notes，不要混入 MVP 实现事实。
-
----
-
-## 产品与架构边界
-
-- MVP 是纯展示工具，不是 Agent 平台。
-- MVP 只做 Agent → App，不做 User → Agent。
-- MVP 不要求 Agent 等待用户反馈。
-- MVP 不实现事件队列。
-- MVP 不实现选择按钮。
-- MVP 不渲染任意 HTML Artifact。
-- MVP 不开放局域网访问。
-- MVP 不做云端服务。
-
-禁止提前引入：
-
-- `choice` block
-- `events` API
-- WebSocket
-- remote access token
-- account / workspace cloud sync
-- HTML artifact renderer
-- MCP tools
-
 除非用户明确要求调整 MVP 边界，否则不要实现这些功能。
 
 ---
 
 ## 技术路线
 
-推荐：
-
 - 桌面：Tauri 2
 - 前端：React + TypeScript
 - 后端：Rust / Tauri backend
-- CLI：MVP 可用 Node.js CLI，后续可迁移 Rust CLI
+- CLI：Rust CLI
 - 本地 API：`http://127.0.0.1:4317`
 
 HTTP 只监听 `127.0.0.1`，不要开放局域网。
 
 ---
 
-## 开发顺序
+## 前端视觉规则
 
-严格按阶段做，不要一次性扩展：
+MVP 视觉目标：轻、克制、像桌面工具，不像网页后台或数据大屏。
 
-1. Tauri 应用骨架 + 托盘
-2. 本地 HTTP 服务：`GET /api/health`、`POST /api/pins`
-3. 收到 Markdown Pin 后创建独立窗口
-4. 支持 image/status blocks
-5. 支持多 block 混排
-6. 实现 `agent-pin` CLI
-7. 最近 Pin 历史和托盘恢复
-8. Skill 文档
+默认风格：
 
-每个 PR 尽量只完成一个阶段。
+- 浅色优先
+- 圆角卡片
+- 柔和阴影
+- 极简标题栏
+- 内容区域留白充足
+- Markdown 阅读体验优先
+- 图片展示干净
+- 可适度使用半透明或轻毛玻璃，但不能影响可读性
+
+避免：
+
+- 深色控制台风
+- 厚重科技蓝
+- 大屏数据看板风
+- 复杂动画
+- 类网页 dashboard
+- 过度拟物
+
+Pin 应该像一个轻量桌面贴纸，而不是完整应用窗口。
 
 ---
 
@@ -229,13 +239,7 @@ export type PinDocument = {
 }
 ```
 
-修改 Pin JSON 结构时，必须同步更新：
-
-- `docs/mvp-spec.md`
-- `docs/api.md`
-- `docs/cli.md`（如果影响 CLI）
-- `skills/agent-pin/SKILL.md`（如果影响 Agent 使用方式）
-- `examples/pins/`
+修改 Pin JSON 结构时，必须同步更新：`docs/mvp-spec.md`、`docs/api.md`、`docs/cli.md`、`skills/agent-pin/SKILL.md`、`examples/pins/`。
 
 ---
 
@@ -266,13 +270,13 @@ created → failed
 
 ## API 与 CLI 规则
 
-- CLI 是 Agent 的优先入口。
+- CLI 是 Agent 的优先入口，但属于 Phase 2。
 - HTTP API 是桌面应用的底层入口。
 - CLI 底层调用 HTTP，不应复制一套独立业务逻辑。
 - `POST /api/pins` 必须校验请求体。
+- Phase 1 只要求 HTTP + markdown。
+- Phase 2 再实现 Rust CLI、image/status、多 block 和历史。
 - 非法 JSON、空 blocks、图片不存在等情况不能让应用崩溃。
-- 图片路径不存在时，在 Pin 内显示错误 block，而不是拒绝整个 Pin。
-- Markdown 表格和代码块需要基本可读，窄窗口下可以横向滚动。
 - 多个 Pin 创建时要级联排列，避免完全重叠。
 - 关闭窗口不等于删除 Pin。
 
@@ -282,13 +286,7 @@ created → failed
 
 `skills/agent-pin/SKILL.md` 是给外部 Agent 使用 Agent Pin 的说明，不是开发规范。
 
-Skill 应强调：
-
-- 什么时候应该 pin
-- 什么时候不应该 pin
-- 优先使用 `agent-pin` CLI
-- 如何创建 markdown / image / status / mixed Pin
-- MVP 不支持 choice、事件回流、Artifact
+Skill 应强调：什么时候应该 pin、什么时候不应该 pin、优先使用 `agent-pin` CLI、如何创建 markdown / image / status / mixed Pin、MVP 不支持 choice / 事件回流 / Artifact。
 
 修改 CLI 或 Pin JSON 契约时，必须同步更新 skill。
 
@@ -298,17 +296,9 @@ Skill 应强调：
 
 未落地、正在讨论或包含未来路线判断的功能方案，不要写成 MVP 已实现事实。
 
-规则：
-
 - 未来功能可以写入 `docs/roadmap.md` 或 `docs/product-notes.md`。
 - 不要把未来设想写进 `docs/mvp-spec.md` 的已实现范围。
-- 功能实现完成并验收通过后，再把稳定事实合并进：
-  - `docs/mvp-spec.md`
-  - `docs/api.md`
-  - `docs/cli.md`
-  - `docs/architecture.md`
-  - `skills/agent-pin/SKILL.md`
-- 合并时只迁移当前实现事实，不要复制过程性讨论或未确认计划。
+- 功能实现完成并验收通过后，再把稳定事实合并进规格、API、CLI、架构和 skill 文档。
 
 ---
 
@@ -320,26 +310,10 @@ Skill 应强调：
 
 - 在支持子代理的环境中，必须使用独立子代理进行 adversarial review。
 - 子代理应站在反方角度审查：这个改动是否破坏 MVP 边界、是否引入过度设计、是否遗漏错误处理、是否与文档契约冲突。
-- 对抗式审查必须覆盖：需求理解、架构边界、API/CLI 契约、Pin 状态、错误处理、测试与验收。
 - 审查发现的问题必须先处理或明确记录为后续问题，再提交/开 PR。
 - 不要把普通自我总结当作对抗式审查。
 
-如果当前工具环境不支持子代理：
-
-- 必须明确说明“无法使用子代理”的原因。
-- 必须执行一次等价的反方清单审查。
-- 除非用户明确豁免，否则不要跳过提交前审查。
-
-推荐审查问题：
-
-1. 这个改动是否违背“纯展示 MVP”？
-2. 是否偷偷加入 choice、events、Artifact、MCP、云同步等非 MVP 功能？
-3. 是否破坏 PinDocument 契约？
-4. CLI、HTTP、前端渲染是否仍使用同一事实源？
-5. 坏输入是否会导致崩溃或静默失败？
-6. 关闭窗口、恢复窗口、最近历史是否语义一致？
-7. 文档、示例、skill 是否同步更新？
-8. 是否有最小可验证命令或步骤？
+如果当前工具环境不支持子代理，必须明确说明原因，并执行一次等价的反方清单审查。
 
 ---
 
@@ -358,7 +332,7 @@ pnpm typecheck
 pnpm test
 ```
 
-第一阶段最重要的验收命令：
+Phase 1 验收命令：
 
 ```bash
 curl -X POST http://127.0.0.1:4317/api/pins \
@@ -372,22 +346,17 @@ curl -X POST http://127.0.0.1:4317/api/pins \
 
 ## 测试与验收要求
 
-窄范围改动先跑最小相关检查；触及共享契约、API、CLI 或窗口生命周期时，要扩大验证范围。
-
 必须验证：
 
 - `GET /api/health`
 - `POST /api/pins`
 - Markdown Pin 创建
-- Image Pin 创建
-- Status Pin 创建
-- mixed Pin 创建
 - 非法 JSON
 - 空 blocks
 - 不支持 block type
-- 图片路径不存在
-- 多 Pin 级联排列
-- 关闭后恢复
+- Pin 可拖动、缩放、置顶、关闭
+
+Phase 2 还必须验证：Image Pin、Status Pin、mixed Pin、多 Pin 级联、关闭后恢复、Rust CLI。
 
 如果有测试无法运行，需要说明原因。
 
@@ -401,7 +370,6 @@ curl -X POST http://127.0.0.1:4317/api/pins \
 - 搜索文本或文件优先用 `rg`。
 - 不要默认使用 Bash-only 脚本。
 - 路径处理必须兼容 Windows 反斜杠、空格路径和 Unix 风格路径。
-- 图片路径示例应尽量覆盖 Windows 路径和相对路径。
 
 ---
 
@@ -413,17 +381,3 @@ curl -X POST http://127.0.0.1:4317/api/pins \
 - 优先保证最小闭环可运行。
 - 提交前必须进行对抗式审查。
 - PR 描述必须包含：改了什么、没做什么、如何验证、是否更新文档。
-
----
-
-## 最小验收标准
-
-第一阶段最小闭环：
-
-1. 应用启动。
-2. HTTP 服务监听 `127.0.0.1:4317`。
-3. `GET /api/health` 返回 ok。
-4. `POST /api/pins` 接收 Markdown Pin JSON。
-5. 桌面出现一个独立 Markdown Pin 窗口。
-6. Pin 可拖动、缩放、置顶、关闭。
-7. 非法请求不导致应用崩溃。
