@@ -22,12 +22,24 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "publisher": "Agent Pin",
+    "category": "Productivity",
+    "shortDescription": "Agent Pin - 让 Agent 把重要内容贴到桌面上",
+    "longDescription": "Agent Pin 是一个本地桌面工具，让 Agent 可以通过 CLI / HTTP 把 Markdown、图片和状态信息推送成独立桌面 Pin 窗口。MVP 不做 choice、不做点击反馈、不做 Artifact。",
+    "copyright": "Copyright © 2026 Agent Pin Contributors",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/icon.ico",
       "icons/icon.png"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "languages": ["SimpChinese", "English"],
+        "installMode": "currentUser"
+      }
+    }
   }
 }

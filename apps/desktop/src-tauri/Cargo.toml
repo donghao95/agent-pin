@@ -3,6 +3,7 @@ name = "agent-pin-desktop"
 version = "0.1.0"
 description = "Agent Pin desktop app"
 authors = ["Agent Pin"]
+license = "Apache-2.0"
 edition = "2021"
 
 [lib]

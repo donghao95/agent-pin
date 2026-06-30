@@ -3,7 +3,7 @@ name = "agent-pin"
 version = "0.1.0"
 edition = "2021"
 description = "Agent Pin CLI - push important content to desktop pins"
-license = "MIT"
+license = "Apache-2.0"
 
 [[bin]]
 name = "agent-pin"

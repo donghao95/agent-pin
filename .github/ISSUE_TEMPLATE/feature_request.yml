@@ -1,0 +1,29 @@
+name: 功能请求
+description: 建议为 Agent Pin 增加新能力
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认请求不落在 AGENTS.md 的"明确不做"清单中：
+        choice、事件回流、Artifact、MCP Server、云同步、远程访问、截图/OCR/录屏、复杂主题系统。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决什么问题
+      description: 描述你遇到的具体场景或痛点，而不是直接给方案。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你建议的方案
+      description: 可选。没有也可不填，留空讨论。
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 可选。

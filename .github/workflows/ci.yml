@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# CI 工作流目标：在 Windows 上验证 lint / typecheck / Rust 编译均通过。
+# 不跑 pnpm build（完整 Tauri 构建在 release.yml 中执行），避免 CI 双重构建。
+# 当前项目无单元测试，cargo test 仅用于回归未来加入的测试。
+
+jobs:
+  build:
+    name: CI (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.0
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pnpm-store
+            node_modules
+            apps/desktop/node_modules
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            apps/desktop/src-tauri/target
+            packages/cli/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Version sync check
+        run: node scripts/sync-version.mjs --check
+
+      - name: Lint (ESLint)
+        run: pnpm lint
+
+      - name: Typecheck (tsc --noEmit)
+        run: pnpm typecheck
+
+      - name: Rust check (shared crate)
+        run: cargo check --manifest-path packages/shared/Cargo.toml --locked
+
+      - name: Rust check (CLI crate)
+        run: cargo check --manifest-path packages/cli/Cargo.toml --locked
+
+      - name: Rust check (desktop backend)
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+      - name: Rust test
+        shell: bash
+        continue-on-error: true  # 当前项目无单元测试，此步骤为占位，等有 #[test] 后移除
+        run: |
+          cargo test --manifest-path packages/shared/Cargo.toml --locked
+          cargo test --manifest-path packages/cli/Cargo.toml --locked
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked

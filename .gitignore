@@ -7,7 +7,13 @@ dist/
 build/
 out/
 target/
-src-tauri/target/
+
+# TypeScript incremental
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+.nyc_output/
 
 # Tauri / desktop
 *.msi
@@ -15,6 +21,7 @@ src-tauri/target/
 *.AppImage
 *.deb
 *.rpm
+.tauri/
 
 # Logs
 *.log
@@ -31,15 +38,17 @@ pnpm-debug.log*
 # OS / editor
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 .vscode/
 .idea/
 
 # Local Agent Pin runtime data
-.agent-deskpin/
 .agent-pin/
 
 # Local planning / proposal artifacts (not part of source)
 agent-pin-proposal.html
 
-# Rust library crate lock files (library Cargo.lock not committed; binaries' Cargo.lock IS committed)
-packages/shared/Cargo.lock
+# Rust lock files: 提交所有 Cargo.lock（含 lib crate），保证 CI 与本地依赖版本一致。
+# shared 是内部契约 crate 不发版到 crates.io，提交 lockfile 利大于弊。
