@@ -65,8 +65,11 @@ UNSUPPORTED_BLOCK_TYPE
 IMAGE_NOT_FOUND
 IMAGE_UNSUPPORTED
 WINDOW_CREATE_FAILED
+PIN_NOT_FOUND
 INTERNAL_ERROR
 ```
+
+`PIN_NOT_FOUND` 在 Phase 2-B 引入：`show` / `hide` 路由的 `{pinId}` 在 registry 中不存在时返回 404。`delete`（管理界面 invoke）同样使用此错误码。
 
 ---
 
@@ -136,9 +139,13 @@ Content-Type: application/json
 ```json
 {
   "ok": true,
-  "pinId": "pin_20260630_121530_pr_review"
+  "pinId": "pin_1782801843675_717272"
 }
 ```
+
+`pinId` 格式：`pin_<timestamp_ms>_<6位随机数字>`，例如 `pin_1782801843675_717272`。timestamp_ms 是 Unix 毫秒时间戳，6 位随机用于同一毫秒内的冲突避免。
+
+Phase 2-B 起，创建成功后会持久化到 `~/.agent-pin/pins/{pinId}.json` 并在 `state.json` 中记录元数据。窗口创建失败时会回滚（删除已写入的持久化文件）。
 
 失败响应：
 
@@ -152,15 +159,15 @@ Content-Type: application/json
 }
 ```
 
-Phase 1 只要求支持 `markdown` block。`image`、`status` 和多 block 混排在 Phase 2 补齐。
+Phase 1 只要求支持 `markdown` block。`image`、`status` 和多 block 混排在 Phase 2-A 补齐。
 
 ---
 
 ## 5. GET /api/pins
 
-Phase：2
+Phase：2-B
 
-列出最近 Pin。
+列出所有 Pin 元数据（按 createdAt 降序）。
 
 请求：
 
@@ -175,48 +182,82 @@ GET /api/pins
   "ok": true,
   "pins": [
     {
-      "pinId": "pin_20260630_121530_pr_review",
+      "pinId": "pin_1782801843675_717272",
       "title": "PR 审查结果",
       "createdAt": "2026-06-30T12:15:30+08:00",
-      "visible": true
+      "updatedAt": "2026-06-30T12:20:00+08:00",
+      "state": "visible",
+      "source": {
+        "agent": "codex",
+        "workspace": "TryCue"
+      }
     }
   ]
 }
 ```
 
+字段说明：
+
+- `pinId`：Pin 唯一标识
+- `title`：Pin 标题
+- `createdAt` / `updatedAt`：ISO 8601 时间戳
+- `state`：`visible` / `hidden` / `failed`
+  - `visible`：窗口当前可见
+  - `hidden`：窗口已关闭/隐藏，但记录保留，可 show 恢复
+  - `failed`：Pin 文件损坏或丢失（启动时 load_from_disk 检测到 doc 缺失/损坏会标记为 failed）
+- `source`：可选，Pin 来源信息（agent / workspace / task / conversationId）
+
 ---
 
 ## 6. POST /api/pins/{pinId}/show
 
-Phase：2
+Phase：2-B
 
-重新显示一个已隐藏 Pin。
+重新显示一个已隐藏 Pin。从 registry 读取 PinDocument，重新创建窗口。
+
+幂等：如果 Pin 已是 visible 状态，直接返回 ok，不重复创建窗口。
 
 ```http
 POST /api/pins/{pinId}/show
 ```
 
-响应：
+成功响应：
 
 ```json
 {
   "ok": true
 }
 ```
+
+失败响应（pinId 不存在）：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "PIN_NOT_FOUND",
+    "message": "pin not found: pin_xxx"
+  }
+}
+```
+
+窗口创建失败返回 `WINDOW_CREATE_FAILED`（500）。
 
 ---
 
 ## 7. POST /api/pins/{pinId}/hide
 
-Phase：2
+Phase：2-B
 
-隐藏一个 Pin。关闭窗口时可以复用这个逻辑。
+隐藏一个 Pin：销毁窗口 + state 标记 hidden。记录保留，可从托盘或管理界面恢复。
+
+幂等：如果 Pin 已是 hidden 状态，直接返回 ok。
 
 ```http
 POST /api/pins/{pinId}/hide
 ```
 
-响应：
+成功响应：
 
 ```json
 {
@@ -224,13 +265,27 @@ POST /api/pins/{pinId}/hide
 }
 ```
 
+失败响应（pinId 不存在）：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "PIN_NOT_FOUND",
+    "message": "pin not found: pin_xxx"
+  }
+}
+```
+
+注意：用户点 Pin 窗口关闭按钮会触发 `WindowEvent::Destroyed`，lib.rs 的事件处理器会自动把状态标记为 hidden（如果当前是 visible）。这与 `POST /hide` 走同一套状态机，但路径不同：前者是窗口事件回调，后者是 HTTP 调用。
+
 ---
 
 ## 8. POST /api/pins/hide-all
 
-Phase：2
+Phase：2-B
 
-隐藏所有当前可见 Pin。
+隐藏所有当前可见 Pin。遍历 registry 中所有 visible 的 Pin，逐个销毁窗口并标记 hidden。
 
 ```http
 POST /api/pins/hide-all
@@ -243,6 +298,8 @@ POST /api/pins/hide-all
   "ok": true
 }
 ```
+
+即使部分窗口销毁失败，也继续处理其余 Pin，错误记录到 stderr 但不中断。最终始终返回 ok。
 
 ---
 

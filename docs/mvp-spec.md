@@ -63,7 +63,7 @@ MVP 只做 Agent → App 的纯展示，不做 User → Agent 的事件回流。
 - Markdown 支持标题、列表、引用、代码块、链接、Markdown 表格
 - Image 支持本地图片路径
 - Status 支持 `info` / `success` / `warning` / `error`
-- 简单最近 Pin 历史，关闭后可从托盘重新打开
+- 简单最近 Pin 历史，关闭后可恢复（混合方案：托盘快恢最近 5 个 + 管理界面完整历史）
 - 基础错误处理，坏输入不能导致应用崩溃
 - Agent 使用 skill 文档
 
@@ -377,15 +377,16 @@ Skill 应优先教 Agent 使用 CLI，而不是直接写 curl。
 
 应用启动后常驻系统托盘。
 
-菜单：
+托盘菜单（Phase 2-B 实现口径）：
 
-- 显示最近 Pin
-- 隐藏所有 Pin
-- 打开 Agent Pin
-- 打开数据目录
-- 退出
+- 最近 5 个 hidden Pin（点击快速重新打开，即"快恢"）
+- 打开管理界面（完整历史 + 搜索 + 删除）
+- 隐藏全部 Pin
+- 退出 Agent Pin
 
-MVP 可以没有完整主窗口，只保留托盘和 Pin 窗口。
+托盘只做应用存活 + 快恢入口 + 退出。Pin 完整生命周期管理（完整历史、搜索、删除）走独立的管理界面窗口（`?manager=1`）。
+
+MVP 可以没有完整主窗口，只保留托盘、Pin 窗口和管理界面窗口。
 
 ## 14. 本地存储
 
@@ -394,14 +395,14 @@ MVP 不使用数据库，使用文件系统。
 目录：
 
 ```text
-~/.agent-pin/
-  inbox/
-  pins/
-  failed/
-  state.json
+~/.agent-pin/           # Windows: %USERPROFILE%\.agent-pin\
+  pins/                 # 每个 Pin 的 PinDocument，文件名 {pinId}.json
+  state.json            # 所有 Pin 的元数据（PinMeta 列表）
 ```
 
-`state.json` 记录最近 Pin 和窗口状态。
+`state.json` 记录所有 Pin 的元数据（pinId / title / createdAt / updatedAt / state / source）。`pins/{pinId}.json` 存储完整 PinDocument。
+
+写入策略：原子写（先写 `.tmp` 再 rename）。启动时 `load_from_disk` 读取，坏文件降级为空不阻塞启动。
 
 ## 15. 错误处理
 

@@ -129,27 +129,70 @@ Desktop 校验 PinDocument（持久化由 Phase 2-B 已实现）
 创建 Pin 窗口
 ```
 
+### Phase 2-B：入口与状态更新职责
+
+Phase 2-B 有三套入口触发 Pin 状态变更，它们的状态更新和托盘刷新职责如下：
+
+| 入口 | 状态更新 | 托盘刷新 | 说明 |
+|------|---------|---------|------|
+| HTTP `/api/pins/{pinId}/show` | `set_state(visible)`，失败则回滚 destroy 窗口 | `tray::refresh` | HTTP 是 Agent 的核心入口 |
+| HTTP `/api/pins/{pinId}/hide` | `set_state(hidden)` | `tray::refresh` | |
+| HTTP `/api/pins/hide-all` | 遍历 visible 逐个 `set_state(hidden)` | `tray::refresh` | |
+| invoke `show_pin` / `hide_pin` / `hide_all_pins` / `delete_pin` | 同 HTTP 对应路由 | `tray::refresh` | 管理界面按钮触发 |
+| 托盘快恢菜单点击 | `show_pin_by_id` 内 `set_state(visible)`，失败回滚 | 调用方 `refresh` | |
+| 窗口关闭按钮 → `WindowEvent::Destroyed` | `on_window_event` 检测到后 `set_state(hidden)` | `tray::refresh` | 只在 state==visible 时更新，避免与 HTTP hide 重复 |
+
+关键约束：`window.rs create_pin_window` 要求 label（pinId）不冲突。所有 show 入口在调 `create_pin_window` 前必须先调 `hide_pin_window` 清理可能的孤儿窗口。
+
 ### Phase 2-B：关闭 Pin
 
 ```text
-用户关闭窗口
+用户点 Pin 窗口关闭按钮 / POST /api/pins/{pinId}/hide / 托盘"隐藏全部"
   ↓
-窗口隐藏或销毁
+窗口 destroy（WindowEvent::Destroyed 触发）
   ↓
-state.json 更新 visible=false
+lib.rs on_window_event 检测到 Destroyed：
+  - 若 label == "manager" 忽略
+  - 若 registry 中该 Pin 当前 state == visible，则 set_state(hidden)
+  - 若已是 hidden（HTTP/invoke hide 主动触发，先于事件回调执行），不重复更新
   ↓
-托盘最近 5 列表 + 管理界面仍保留
+state.json 更新 state=hidden, updatedAt=now
+  ↓
+托盘 refresh() 重建菜单（该 Pin 进入最近 5 hidden 列表）
+  ↓
+管理界面仍保留记录
 ```
 
 ### Phase 2-B：重新打开 Pin
 
 ```text
-用户从托盘右键最近 5 列表点击，或打开管理界面选择
+用户从托盘右键最近 5 hidden Pin 点击 / 管理界面点"显示" / POST /api/pins/{pinId}/show
   ↓
-读取 pins/<pinId>.json
+registry.get(pinId) 从内存读 PinDocument（启动时已 load_from_disk）
   ↓
-重新创建窗口
+清理可能的孤儿窗口（hide_pin_window 幂等）
+  ↓
+create_pin_window 重新创建窗口
+  ↓
+set_state(visible), 托盘 refresh()
 ```
+
+### Phase 2-B：删除 Pin
+
+```text
+管理界面点"删除" + window.confirm 确认 / invoke delete_pin
+  ↓
+hide_pin_window 销毁窗口（如果存在）
+  ↓
+registry.remove(pinId)：
+  - 删 pins/{pinId}.json 文件
+  - 从内存 registry 移除
+  - 更新 state.json
+  ↓
+管理界面 refresh()
+```
+
+删除不可恢复，与 hide（可恢复）是两套独立路径。
 
 ---
 
@@ -157,18 +200,26 @@ state.json 更新 visible=false
 
 每个 Pin 是一个独立窗口。
 
-窗口 label 建议：
+窗口 label（即 pinId）格式：
 
 ```text
-pin_<timestamp>_<slug>
+pin_<timestamp_ms>_<6位随机数字>
 ```
 
-窗口创建默认参数：
+例如 `pin_1782801843675_717272`。timestamp_ms 是 Unix 毫秒时间戳，6 位随机用于同一毫秒内的冲突避免。
+
+窗口类型：
+
+- **Pin 窗口**（label 是 pinId）：`decorations(false)` + `shadow(true)` + 自定义轻标题栏 + `alwaysOnTop=true` + `skipTaskbar=true`
+- **管理界面窗口**（label 固定为 `manager`）：`decorations(true)` 系统装饰 + `resizable(true)` + 880×620 + min 640×400
+
+窗口创建默认参数（Pin 窗口）：
 
 - alwaysOnTop: true
 - resizable: true
-- decorations: false 或轻边框
-- skipTaskbar: true，可选
+- decorations: false（前端自定义标题栏）
+- shadow: true（DWM 提供 OS 级圆角+阴影）
+- skipTaskbar: true
 
 MVP 不做复杂窗口吸附和透明度。
 
@@ -176,17 +227,46 @@ MVP 不做复杂窗口吸附和透明度。
 
 ## 5. 存储
 
-Phase 1 可以不实现历史存储，只保证窗口可创建。
+Phase 1 不实现历史存储，只保证窗口可创建。
 
-Phase 2-B 必须实现文件系统存储：
+Phase 2-B 实现文件系统存储：
 
 ```text
 ~/.agent-pin/           # Windows: %USERPROFILE%\.agent-pin\
-  inbox/
-  pins/
-  failed/
-  state.json
+  pins/                 # 每个 Pin 的 PinDocument，文件名 {pinId}.json
+  state.json            # 所有 Pin 的元数据（PinMeta 列表）
 ```
+
+`state.json` 结构：
+
+```json
+{
+  "version": 1,
+  "pins": [
+    {
+      "pinId": "pin_1782801843675_717272",
+      "title": "PR 审查结果",
+      "createdAt": "2026-06-30T12:15:30+08:00",
+      "updatedAt": "2026-06-30T12:20:00+08:00",
+      "state": "visible",
+      "source": { "agent": "codex", "workspace": "TryCue" }
+    }
+  ]
+}
+```
+
+写入策略：
+
+- 创建 Pin：先写 `pins/{pinId}.json`，再更新 `state.json`（原子写：先写 `.tmp` 再 rename）
+- 状态变更（show/hide）：只更新 `state.json` 的 `state` 和 `updatedAt` 字段
+- 删除 Pin：先删 `pins/{pinId}.json`，再更新 `state.json`
+
+启动加载（`load_from_disk`）：
+
+- 读取 `state.json`，坏文件降级为空列表（不阻塞启动）
+- 每个 Pin 的 `state` 如果是 `visible`，降级为 `hidden`（重启后窗口实际不可见）
+- 对应的 `pins/{pinId}.json` 缺失或损坏时，标记为 `failed`，并写入占位 PinDocument
+- 不自动恢复窗口（用户主动 show）
 
 历史能力属于完整 MVP：Pin 关闭后不能直接消失，必须可恢复（Phase 2-B 实现）。
 

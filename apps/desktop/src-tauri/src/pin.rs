@@ -111,6 +111,8 @@ pub enum PinErrorCode {
     ImageNotFound,
     /// 图片格式不支持（非 PNG/JPG/JPEG/WebP/GIF）。
     ImageUnsupported,
+    /// Phase 2-B：show/hide/delete 路由中 pinId 不存在。
+    PinNotFound,
     WindowCreateFailed,
     InternalError,
 }
@@ -149,6 +151,19 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
             PinErrorCode::InvalidPinDocument,
             "title must be non-empty",
         ));
+    }
+    // 校验 window.height：如果是字符串变体，值必须恰好是 "auto"。
+    // PinHeight 用 untagged 反序列化，任何字符串都会被当作 Auto，需要在这里拦截非法值，
+    // 避免 "tall"/"100px" 等错误输入被静默当作 auto 处理。
+    if let Some(win) = &doc.window {
+        if let Some(PinHeight::Auto(s)) = &win.height {
+            if s != "auto" {
+                return Err(PinError::new(
+                    PinErrorCode::InvalidPinDocument,
+                    format!("window.height string must be \"auto\", got {:?}", s),
+                ));
+            }
+        }
     }
     if doc.blocks.is_empty() {
         return Err(PinError::new(

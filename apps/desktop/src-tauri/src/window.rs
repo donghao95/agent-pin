@@ -4,9 +4,13 @@
 // - 为每个 Pin 创建独立的 Tauri WebviewWindow
 // - 多 Pin 级联排列，避免完全重叠（右上角出生，向左下偏移 24px）
 // - 应用自定义轻标题栏（decorations=false，前端自己画标题栏）
+// - hide_pin_window：销毁窗口（幂等），用于 hide 路由和 show 路由清理孤儿窗口
 //
 // 窗口 URL 只携带 pinId，不携带完整 PinDocument。
 // 前端通过 invoke(get_pin_document, pinId) 获取渲染数据。
+//
+// Phase 2-B：show 路由复用 create_pin_window（从 registry 读 doc 重建窗口）。
+// 窗口位置不持久化：用户拖动后的位置丢失，show 时重新级联。
 //
 // 契约来源：docs/ui-style.md §4、docs/mvp-spec.md §12
 
@@ -26,6 +30,7 @@ const MARGIN: f64 = 40.0;
 const MAX_HEIGHT_RATIO: f64 = 0.7;
 
 /// 为 Pin 创建独立桌面窗口。
+/// 调用方需确保 label（pin_id）不冲突：show 路由应先调 hide_pin_window 清理孤儿窗口。
 pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Result<(), String> {
     let label = pin_id.to_string();
     // URL 只带 pinId，数据走 invoke
@@ -93,6 +98,18 @@ pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Re
     Ok(())
 }
 
+/// 隐藏 Pin 窗口（destroy）。
+/// 幂等：窗口不存在返回 Ok。
+/// 注意：destroy 会触发 Destroyed 事件，lib.rs 的 on_window_event 负责状态更新。
+pub fn hide_pin_window(app: &AppHandle, pin_id: &str) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(pin_id) {
+        win.destroy()
+            .map_err(|e| format!("failed to destroy window {}: {}", pin_id, e))?;
+    }
+    // 窗口不存在：幂等返回 Ok
+    Ok(())
+}
+
 /// 计算级联位置：右上角出生，向左下偏移。
 fn compute_cascade_position(app: &AppHandle, win_w: f64) -> Result<(f64, f64), String> {
     let monitor = app
@@ -103,8 +120,12 @@ fn compute_cascade_position(app: &AppHandle, win_w: f64) -> Result<(f64, f64), S
     let screen_w = monitor.size().width as f64 / scale;
     let screen_h = monitor.size().height as f64 / scale;
 
-    // 当前已有窗口数决定偏移
-    let count = app.webview_windows().len();
+    // 当前已有 Pin 窗口数决定偏移（排除 manager 窗口，它不是 Pin）
+    let count = app
+        .webview_windows()
+        .values()
+        .filter(|w| w.label() != "manager")
+        .count();
     let offset = (count as f64) * CASCADE_OFFSET;
 
     // 右上角，向左下偏移；clamp 防止超出屏幕

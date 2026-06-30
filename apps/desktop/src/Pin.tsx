@@ -34,6 +34,12 @@ type PinDocument = {
 // status block 的 level 类型
 type StatusLevel = "info" | "success" | "warning" | "error";
 
+// 类型守卫：后端已校验 level，但防御性白名单校验避免持久化数据被篡改时注入任意 className。
+// 同时让 TS 收窄 string → StatusLevel，避免后续 statusIcon(level) 类型错误。
+function isStatusLevel(v: unknown): v is StatusLevel {
+  return v === "info" || v === "success" || v === "warning" || v === "error";
+}
+
 export default function Pin() {
   const [doc, setDoc] = useState<PinDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -132,7 +138,6 @@ export default function Pin() {
             );
           }
           if (block.type === "status") {
-            // 后端已校验 level，但防御性白名单校验避免持久化数据被篡改时注入任意 className
             const level = isStatusLevel(block.level) ? block.level : "info";
             return (
               <div className={`pin-block pin-status pin-status-${level}`} key={i}>
@@ -141,10 +146,13 @@ export default function Pin() {
               </div>
             );
           }
-          // 未知 block 类型兜底，不静默吞错
+          // 未知 block 类型兜底，不静默吞错。
+          // 经前面三个 if 收窄后 TS 认为 block 是 never，但运行时可能传来未知 type 的对象，
+          // 用 as 转换访问 type 字段，避免 TS 报错且保留运行时兜底能力。
+          const unknown = block as { type: string };
           return (
             <div className="pin-block pin-unsupported" key={i}>
-              unsupported block type: {block.type}
+              unsupported block type: {unknown.type}
             </div>
           );
         })}

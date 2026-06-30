@@ -86,3 +86,29 @@ Phase 1 的 Pin 窗口应满足：
 - Markdown 标题、列表、代码块在小窗口中可读。
 - 置顶时不显得打扰。
 - 移动/缩放时的边缘闪烁属已知限制，不阻塞 Phase 1 验收。
+
+## 7. 管理界面窗口（Phase 2-B）
+
+Phase 2-B 引入独立的管理界面窗口（`?manager=1`），与 Pin 窗口视觉风格独立。
+
+技术差异：
+
+- 使用系统装饰（`decorations(true)`），由 OS 提供标题栏、关闭/最大化/最小化按钮。
+- 不受 Pin 窗口的 WebView2 透明窗口限制，可自由使用 CSS 圆角、阴影、半透明背景。
+- 默认尺寸 880×620，最小 640×400，可调整大小。
+
+视觉原则：
+
+- 浅色主题，与 Pin 窗口风格呼应（都是"轻、克制"的桌面工具感）。
+- 顶部 header：标题 + 统计（共/可见/隐藏/异常）+ 搜索框 + 工具按钮（刷新/隐藏全部/打开数据目录）。
+- 列表区：PinCard 卡片式排列，每张卡片显示状态图标 + 标题 + 时间 + agent/workspace 标签 + 显示/隐藏/删除按钮。
+- 状态图标：visible=●（实心圆）、hidden=○（空心圆）、failed=✕。
+- 删除操作前 `window.confirm` 二次确认。
+- 错误消息以可点击关闭的提示条展示，不阻塞列表操作。
+
+类名前缀：
+
+- 布局类：`manager-*`（如 `manager-root`、`manager-header`、`manager-body`）。
+- 卡片类：`pin-card-*`（如 `pin-card`、`pin-card-title`、`pin-card-btn`）。
+
+注意：`pin-card-*` 类名与 Pin 窗口的 `pin-*` 类名不重叠（Pin 窗口没有 `pin-card` 前缀），两个 CSS 文件可同时加载无冲突。
