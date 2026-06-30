@@ -16,6 +16,22 @@ Pin Window Manager
 Web Frontend 渲染 Pin
 ```
 
+Phase 1 先跳过 CLI，直接通过 HTTP 验证最小闭环：
+
+```text
+curl / HTTP client
+  ↓
+POST /api/pins
+  ↓
+Tauri Rust Backend
+  ↓
+创建 Markdown Pin Window
+```
+
+Phase 2 再补 Rust CLI、历史、托盘恢复和完整 blocks。
+
+---
+
 ## 2. 模块
 
 ### apps/desktop
@@ -24,15 +40,15 @@ Tauri 桌面应用。
 
 职责：
 
-- 系统托盘
+- 系统托盘，Phase 2
 - 本地 HTTP 服务
 - Pin 窗口创建和管理
-- 最近 Pin 状态保存
+- 最近 Pin 状态保存，Phase 2
 - 渲染 Pin 内容
 
 ### packages/cli
 
-`agent-pin` CLI。
+Rust `agent-pin` CLI，Phase 2 实现。
 
 职责：
 
@@ -49,14 +65,28 @@ Tauri 桌面应用。
 
 - PinDocument 类型
 - PinBlock 类型
-- JSON schema / zod schema
+- JSON schema / 校验逻辑
 - 错误码定义
 
-MVP 可以先不强制抽 shared 包，但后续建议抽离，避免 CLI 和 desktop 类型漂移。
+MVP 建议尽早抽 shared，避免 CLI 和 desktop 类型漂移。
+
+---
 
 ## 3. 数据流
 
-### 创建 Pin
+### Phase 1：创建 Markdown Pin
+
+```text
+curl POST /api/pins
+  ↓
+Desktop 校验 PinDocument
+  ↓
+创建独立 Pin 窗口
+  ↓
+前端渲染 Markdown
+```
+
+### Phase 2：CLI 创建 Pin
 
 ```text
 agent-pin markdown --title "PR 审查结果" --file review.md
@@ -72,7 +102,7 @@ Desktop 校验 PinDocument
 创建 Pin 窗口
 ```
 
-### 关闭 Pin
+### Phase 2：关闭 Pin
 
 ```text
 用户关闭窗口
@@ -84,7 +114,7 @@ state.json 更新 visible=false
 托盘最近列表仍保留
 ```
 
-### 重新打开 Pin
+### Phase 2：重新打开 Pin
 
 ```text
 用户从托盘点击最近 Pin
@@ -93,6 +123,8 @@ state.json 更新 visible=false
   ↓
 重新创建窗口
 ```
+
+---
 
 ## 4. 窗口管理
 
@@ -113,9 +145,13 @@ pin_<timestamp>_<slug>
 
 MVP 不做复杂窗口吸附和透明度。
 
+---
+
 ## 5. 存储
 
-默认目录：
+Phase 1 可以不实现历史存储，只保证窗口可创建。
+
+Phase 2 必须实现文件系统存储：
 
 ```text
 ~/.agent-pin/
@@ -125,9 +161,37 @@ MVP 不做复杂窗口吸附和透明度。
   state.json
 ```
 
-MVP 不使用数据库。
+历史能力属于完整 MVP：Pin 关闭后不能直接消失，必须可恢复。
 
-## 6. 后续扩展点
+---
+
+## 6. 前端风格
+
+MVP 视觉目标：轻、克制、像桌面工具，不像网页后台或数据大屏。
+
+默认风格：
+
+- 浅色优先
+- 圆角卡片
+- 柔和阴影
+- 极简标题栏
+- 内容区域留白充足
+- Markdown 阅读体验优先
+- 图片展示干净
+- 可适度使用半透明或轻毛玻璃，但不能影响可读性
+
+避免：
+
+- 深色控制台风
+- 厚重科技蓝
+- 大屏数据看板风
+- 复杂动画
+- 类网页 dashboard
+- 过度拟物
+
+---
+
+## 7. 后续扩展点
 
 - choice pin
 - 事件队列
