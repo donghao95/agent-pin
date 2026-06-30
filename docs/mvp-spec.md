@@ -107,7 +107,7 @@ Tauri Rust Backend
 Web Frontend 渲染 Pin
 ```
 
-文件夹投递可作为调试和兜底能力，但不是第一主路径。
+MVP 不实现文件夹投递协议。Agent 优先用 CLI，CLI 不可用时直接调用 HTTP API。
 
 ## 7. 核心概念
 

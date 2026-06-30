@@ -319,20 +319,32 @@ Skill 应强调：什么时候应该 pin、什么时候不应该 pin、优先使
 
 ## 本地开发命令
 
-当前仓库尚未初始化代码。实现后应补充实际命令。
-
-预期命令形态：
+桌面应用（`apps/desktop/`）：
 
 ```bash
 pnpm install
-pnpm dev
-pnpm build
-pnpm lint
-pnpm typecheck
-pnpm test
+pnpm dev          # 启动 Tauri 开发模式（HTTP + 前端 HMR）
+pnpm build        # 构建生产包
+pnpm lint         # ESLint
+pnpm typecheck    # tsc --noEmit
 ```
 
-Phase 1 验收命令：
+Rust CLI（`packages/cli/`）：
+
+```bash
+cd packages/cli
+cargo build       # 构建 debug 二进制（target/debug/agent-pin.exe）
+cargo check       # 快速编译检查
+```
+
+后端编译检查（`apps/desktop/src-tauri/`）：
+
+```bash
+cd apps/desktop/src-tauri
+cargo check
+```
+
+Phase 1 验收命令（HTTP 创建 Markdown Pin）：
 
 ```bash
 curl -X POST http://127.0.0.1:4317/api/pins \
@@ -341,6 +353,15 @@ curl -X POST http://127.0.0.1:4317/api/pins \
 ```
 
 桌面应出现一个独立 Markdown Pin 窗口。
+
+Phase 2-C 验收命令（CLI 创建 Pin）：
+
+```bash
+cd packages/cli
+.\target\debug\agent-pin.exe health
+.\target\debug\agent-pin.exe markdown --title "测试" --text "## Hello\nCLI 创建的 Pin"
+.\target\debug\agent-pin.exe list
+```
 
 ---
 

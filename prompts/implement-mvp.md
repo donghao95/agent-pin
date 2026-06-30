@@ -82,8 +82,8 @@ curl -X POST http://127.0.0.1:4317/api/pins \
 8. 最近 Pin 历史。
 9. 关闭 Pin 后可以从托盘重新打开。
 10. GET /api/pins。
-11. POST /api/pins/:pinId/show。
-12. POST /api/pins/:pinId/hide。
+11. POST /api/pins/{pinId}/show。
+12. POST /api/pins/{pinId}/hide。
 13. POST /api/pins/hide-all。
 
 仍然不要做 choice、事件回流、Artifact、MCP、云同步。

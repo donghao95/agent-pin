@@ -75,9 +75,9 @@ Agent 使用 Agent Pin 时：
 
 1. 优先使用 `agent-pin` CLI。
 2. 如果 CLI 不可用，再使用 HTTP API。
-3. 如果 HTTP 不可用，最后才使用文件夹投递协议。
+3. 如果 HTTP 也不可用，说明桌面应用未启动，应提示用户先启动 Agent Pin。
 
-MVP skill 中重点写 CLI，不鼓励 Agent 直接拼 curl。
+MVP 不实现文件夹投递协议。MVP skill 中重点写 CLI，不鼓励 Agent 直接拼 curl。
 
 ## 7. 内容质量规则
 
