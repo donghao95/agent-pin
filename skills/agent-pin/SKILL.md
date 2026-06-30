@@ -122,19 +122,45 @@ Example `pin.json`:
 }
 ```
 
+`push` converts relative image paths to absolute (resolved against the current working directory). The desktop backend requires absolute paths; the CLI handles this so Agents can pass relative paths directly.
+
+## Manage Existing Pins
+
+Pins persist across restarts. Closed pins become `hidden` (not deleted) and can be reopened.
+
+List all pins:
+
+```bash
+agent-pin list
+```
+
+Reopen a hidden pin:
+
+```bash
+agent-pin show pin_1782801843675_717272
+```
+
+Hide all visible pins:
+
+```bash
+agent-pin hide-all
+```
+
+Pin IDs are returned by `agent-pin list` and by the creation commands. The desktop app also has a manager window (accessible from the tray) for browsing history, searching, and deleting pins.
+
 ## Fallback
 
-If CLI is unavailable, call the local HTTP API:
+If CLI is unavailable, call the local HTTP API directly:
 
 ```http
 POST http://127.0.0.1:4317/api/pins
+GET  http://127.0.0.1:4317/api/pins
+POST http://127.0.0.1:4317/api/pins/{pinId}/show
+POST http://127.0.0.1:4317/api/pins/{pinId}/hide
+POST http://127.0.0.1:4317/api/pins/hide-all
 ```
 
-If HTTP is unavailable, write a pin JSON file to:
-
-```text
-~/.agent-pin/inbox/
-```
+If the HTTP API is also unavailable, the desktop app is not running. Prompt the user to start Agent Pin first. There is no file-based drop protocol in the MVP.
 
 ## Content Rules
 

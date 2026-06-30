@@ -107,6 +107,8 @@ agent-pin image --title "装修效果图" --path ./render.png
 agent-pin image --title "装修效果图" --path ./render.png --caption "入门柜参考图"
 ```
 
+`--path` 可以是相对路径，CLI 会基于当前工作目录转成绝对路径再 POST（desktop 后端要求绝对路径）。支持的扩展名：PNG/JPG/JPEG/WebP/GIF。文件存在性不校验，前端 `<img>` onerror 显示错误块。
+
 ---
 
 ## 6. agent-pin status
@@ -203,9 +205,10 @@ agent-pin hide-all
 http://127.0.0.1:4317
 ```
 
-可以通过环境变量覆盖：
+可以通过 `--endpoint` 参数或 `AGENT_PIN_ENDPOINT` 环境变量覆盖（仅允许本地回环地址 `127.0.0.1` / `localhost` / `::1`，避免把 Pin 内容发送到远程主机）：
 
 ```bash
+agent-pin --endpoint http://127.0.0.1:4318 health
 AGENT_PIN_ENDPOINT=http://127.0.0.1:4318 agent-pin health
 ```
 
