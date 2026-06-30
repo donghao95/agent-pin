@@ -18,6 +18,7 @@ mod pin;
 mod registry;
 mod storage;
 mod tray;
+mod updater;
 mod window;
 
 use tauri::Manager;
@@ -140,6 +141,16 @@ fn open_data_dir() -> Result<(), String> {
     Ok(())
 }
 
+/// 检查更新：调 GitHub API 查最新 release，与当前版本对比。
+/// force=true 时跳过 24h 缓存强制请求。
+/// 失败返回 Err（前端/托盘决定是否提示）。
+#[tauri::command]
+async fn check_for_updates(force: bool) -> Result<updater::UpdateCheckResult, String> {
+    tauri::async_runtime::spawn_blocking(move || updater::check(force))
+        .await
+        .map_err(|e| format!("join handle: {}", e))?
+}
+
 // ---------- 应用入口 ----------
 
 pub fn run() {
@@ -204,7 +215,26 @@ pub fn run() {
                     .show(move |_| {
                         app_handle.exit(1);
                     });
+                // 托盘构建失败后不再执行后续步骤（更新检查会调 tray::refresh，
+                // 但 tray 不存在只会 eprintln + 浪费一次网络请求）
+                return Ok(());
             }
+
+            // 4. 启动时静默检查更新（异步、不阻塞、失败忽略）
+            //    缓存命中（24h 内）时不会实际请求 GitHub API。
+            //    有新版本时刷新托盘，让"检查更新"菜单项显示最新版本提示。
+            let app_handle_for_update = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match tauri::async_runtime::spawn_blocking(|| updater::check(false)).await {
+                    Ok(Ok(result)) => {
+                        if result.has_update {
+                            tray::refresh(&app_handle_for_update);
+                        }
+                    }
+                    Ok(Err(e)) => eprintln!("[agent-pin] startup update check: {}", e),
+                    Err(e) => eprintln!("[agent-pin] startup update check join: {}", e),
+                }
+            });
 
             Ok(())
         })
@@ -216,6 +246,7 @@ pub fn run() {
             hide_all_pins,
             delete_pin,
             open_data_dir,
+            check_for_updates,
         ])
         .on_window_event(|window, event| {
             // 窗口销毁事件：只在 state=visible 时设 hidden。

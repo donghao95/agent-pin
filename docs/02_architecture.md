@@ -45,8 +45,20 @@ Tauri 桌面应用。
 - Pin 窗口创建和管理
 - 最近 Pin 状态保存，Phase 2
 - 渲染 Pin 内容
+- 更新检查（调 GitHub API 查最新 release，托盘菜单入口）
 
 Phase 1 托盘边界：只表示应用存活 + `Quit Agent Pin`，不做 Pin 历史恢复。关闭 Pin = 销毁窗口；托盘 Quit = 退出应用并停止 HTTP。
+
+模块文件：
+
+- `http.rs` — axum HTTP 服务，监听 `127.0.0.1:4317`
+- `pin.rs` — PinDocument 数据模型（依赖 packages/shared）
+- `registry.rs` — 内存 Pin 注册表，pinId 为键
+- `storage.rs` — 持久化层（`~/.agent-pin/pins/` + `state.json`）
+- `tray.rs` — 系统托盘菜单 + 事件处理
+- `updater.rs` — 更新检查（GitHub API + 24h 缓存）
+- `window.rs` — Pin 窗口创建/销毁
+- `lib.rs` — 应用入口 + invoke 命令 + setup hook
 
 ### packages/cli
 

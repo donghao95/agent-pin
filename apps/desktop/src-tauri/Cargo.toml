@@ -25,6 +25,8 @@ tower-http = { version = "0.7", features = ["limit"] }
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 once_cell = "1"
+# 更新检查用：调 GitHub API 查最新 release。同步阻塞 API，在 spawn_blocking 中调用。
+ureq = { version = "2", features = ["json"] }
 agent-pin-shared = { path = "../../../packages/shared" }
 
 [features]

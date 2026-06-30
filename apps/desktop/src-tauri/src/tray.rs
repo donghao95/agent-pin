@@ -4,7 +4,8 @@
 // 1. 最近 5 个 hidden Pin 快恢（点击即 show）
 // 2. 打开管理界面（完整历史 + 搜索 + 删除）
 // 3. 隐藏全部可见 Pin
-// 4. 退出 Agent Pin
+// 4. 检查更新（调 GitHub API，有新版打开浏览器）
+// 5. 退出 Agent Pin
 //
 // 菜单动态刷新：Pin 状态变化时（show/hide/delete/create）调用方调 refresh()。
 // Tauri 2 没提供"菜单即将显示时重建"的回调，所以必须主动 set_menu。
@@ -16,9 +17,11 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_dialog::DialogExt;
 
 use crate::registry;
 use crate::storage::PinState;
+use crate::updater;
 
 /// 托盘 id（用于 tray_by_id 获取后刷新菜单）
 const TRAY_ID: &str = "main";
@@ -26,6 +29,8 @@ const TRAY_ID: &str = "main";
 const RECENT_LIMIT: usize = 5;
 /// 托盘菜单项标题最大字符数（中文按 chars 截断）
 const TITLE_MAX_CHARS: usize = 30;
+/// 托盘"检查更新"菜单项 id
+const MENU_CHECK_UPDATE: &str = "check_update";
 
 /// 构建系统托盘。在 Tauri setup hook中调用。
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
@@ -94,6 +99,18 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         None::<&str>,
     )?)?;
 
+    // 检查更新
+    // 启动时已静默检查过一次（lib.rs setup），命中缓存时 here 读缓存显示版本号提示。
+    // 缓存未命中或检查失败时显示通用"检查更新"文本。
+    let update_label = build_update_label();
+    menu.append(&MenuItem::with_id(
+        app,
+        MENU_CHECK_UPDATE,
+        update_label,
+        true,
+        None::<&str>,
+    )?)?;
+
     menu.append(&PredefinedMenuItem::separator(app)?)?;
 
     // 退出
@@ -121,6 +138,9 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         "hide_all" => {
             hide_all_visible(app);
             refresh(app);
+        }
+        MENU_CHECK_UPDATE => {
+            handle_check_update(app);
         }
         _ => {
             // 假设是 pinId（最近 5 快恢入口）
@@ -205,4 +225,97 @@ fn truncate(s: &str, max_chars: usize) -> String {
         let truncated: String = s.chars().take(max_chars).collect();
         format!("{}…", truncated)
     }
+}
+
+/// 构建托盘"检查更新"菜单项的 label。
+/// 若有 24h 内缓存的最新版本，显示版本号；否则显示通用"检查更新"。
+fn build_update_label() -> String {
+    match updater::cached_latest_version() {
+        Some(latest) => format!("检查更新（最新 v{}）", latest),
+        None => "检查更新".to_string(),
+    }
+}
+
+/// 处理"检查更新"菜单点击。
+/// spawn_blocking 调 updater::check(true)，根据结果弹 dialog 或打开浏览器。
+fn handle_check_update(app: &AppHandle) {
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = tauri::async_runtime::spawn_blocking(|| updater::check(true)).await;
+        match result {
+            Ok(Ok(check)) => {
+                if check.has_update {
+                    // 有新版：弹 dialog 让用户选择是否打开浏览器
+                    let app_for_dialog = app_handle.clone();
+                    let url = check.release_url.clone();
+                    let latest = check.latest_version.clone();
+                    app_handle
+                        .dialog()
+                        .message(format!(
+                            "发现新版本 v{}\n当前版本 v{}\n\n点击确定打开下载页面。",
+                            latest, check.current_version
+                        ))
+                        .title("Agent Pin 有更新")
+                        .show(move |ok_pressed| {
+                            if ok_pressed {
+                                // 用 tauri-plugin-shell 打开浏览器
+                                if let Err(e) = open_release_url(&app_for_dialog, &url) {
+                                    eprintln!("[agent-pin] open release url: {}", e);
+                                }
+                            }
+                        });
+                } else {
+                    // 已是最新：弹 dialog 提示
+                    app_handle
+                        .dialog()
+                        .message(format!("已是最新版本 v{}", check.current_version))
+                        .title("Agent Pin")
+                        .show(|_| {});
+                }
+                // 检查完成后刷新托盘（更新 label 显示版本号）
+                refresh(&app_handle);
+            }
+            Ok(Err(e)) => {
+                eprintln!("[agent-pin] check_update: {}", e);
+                app_handle
+                    .dialog()
+                    .message("检查更新失败，请稍后重试或访问 GitHub Releases 页面。")
+                    .title("Agent Pin")
+                    .show(|_| {});
+            }
+            Err(e) => {
+                eprintln!("[agent-pin] check_update join: {}", e);
+            }
+        }
+    });
+}
+
+/// 打开 Release URL 到默认浏览器（跨平台）。
+/// 不用 tauri-plugin-shell（已废弃 open 方法，推荐 tauri-plugin-opener），
+/// 改用 std::process::Command，与 open_data_dir 一致风格，避免引入新插件。
+fn open_release_url(_app: &AppHandle, url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let cmd = "cmd";
+    #[cfg(target_os = "windows")]
+    let args = ["/c", "start", "", url];
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "macos")]
+    let args = [url];
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "linux")]
+    let args = [url];
+
+    #[cfg(target_os = "windows")]
+    std::process::Command::new(cmd)
+        .args(args)
+        .spawn()
+        .map_err(|e| format!("open url: {}", e))?;
+    #[cfg(not(target_os = "windows"))]
+    std::process::Command::new(cmd)
+        .arg(url)
+        .spawn()
+        .map_err(|e| format!("open url: {}", e))?;
+    Ok(())
 }
