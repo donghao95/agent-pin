@@ -1,0 +1,231 @@
+/* Agent Pin - Pin 窗口样式
+ * 视觉目标：轻、克制、像桌面贴纸（参考 docs/ui-style.md）
+ * Phase 1 实现：窗口层面（.pin-root/body）不做 CSS 圆角/阴影/毛玻璃。
+ *   原因：Windows WebView2 透明背景 + 圆角会露黑边，backdrop-filter 缩放抖动。
+ *   圆角/阴影由 DWM 通过 WebviewWindowBuilder::shadow(true) 提供（Win11 有，Win10 退化直角）。
+ *   元素级圆角（按钮、代码块、滚动条等）保留，不影响窗口合成。
+ *   详见 docs/ui-style.md §4 Phase 1 视觉退化说明。
+ */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
+    "PingFang SC", sans-serif;
+  font-size: 14px;
+  color: #1f2329;
+  /* 不透明白色背景。
+     Windows WebView2 下 transparent + 圆角会露出窗口黑色底，
+     且 backdrop-filter 在缩放时会重绘抖动。Phase 1 用不透明矩形最稳定。 */
+  background: #ffffff;
+}
+
+.pin-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #ffffff;
+  /* Phase 1 不做 CSS 圆角/阴影/毛玻璃。
+     圆角/阴影由 DWM 通过 shadow(true) 提供（Win11 有，Win10 退化直角）。
+     详见 docs/ui-style.md §4 Phase 1 视觉退化说明。 */
+  overflow: hidden;
+}
+
+/* ---------- 标题栏 ---------- */
+
+.pin-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 6px 0 12px;
+  background: #f8f9fa;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.pin-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f2329;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.pin-close {
+  border: none;
+  background: transparent;
+  color: #646a73;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.pin-close:hover {
+  background: rgba(245, 63, 63, 0.1);
+  color: #f04134;
+}
+
+/* ---------- 内容区 ---------- */
+
+.pin-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 18px;
+}
+
+.pin-block + .pin-block {
+  margin-top: 12px;
+}
+
+/* ---------- Markdown ---------- */
+
+.pin-markdown h1,
+.pin-markdown h2,
+.pin-markdown h3 {
+  margin: 12px 0 8px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+.pin-markdown h1 {
+  font-size: 18px;
+}
+.pin-markdown h2 {
+  font-size: 16px;
+}
+.pin-markdown h3 {
+  font-size: 15px;
+}
+
+.pin-markdown p {
+  margin: 6px 0;
+  line-height: 1.6;
+}
+
+.pin-markdown ul,
+.pin-markdown ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.pin-markdown li {
+  margin: 2px 0;
+  line-height: 1.6;
+}
+
+.pin-markdown blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid #d0d3d6;
+  color: #646a73;
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.pin-markdown code {
+  font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+
+.pin-markdown pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: #f6f7f8;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.pin-markdown pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 13px;
+}
+
+.pin-markdown table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+  width: 100%;
+}
+
+.pin-markdown th,
+.pin-markdown td {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.pin-markdown th {
+  background: rgba(0, 0, 0, 0.03);
+  font-weight: 600;
+}
+
+.pin-markdown a {
+  color: #3370ff;
+  text-decoration: none;
+}
+
+.pin-markdown a:hover {
+  text-decoration: underline;
+}
+
+.pin-markdown hr {
+  border: none;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  margin: 12px 0;
+}
+
+/* ---------- 错误 / 占位 ---------- */
+
+.pin-error {
+  color: #f04134;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.pin-unsupported {
+  color: #8a8f99;
+  font-size: 12px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 4px;
+}
+
+/* ---------- 滚动条 ---------- */
+
+.pin-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.pin-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.pin-body::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+
+.pin-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}

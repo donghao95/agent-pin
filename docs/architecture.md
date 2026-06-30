@@ -40,11 +40,13 @@ Tauri 桌面应用。
 
 职责：
 
-- 系统托盘，Phase 2
+- 最小系统托盘（Phase 1 仅应用退出；Phase 2 起 扩展为历史恢复入口）
 - 本地 HTTP 服务
 - Pin 窗口创建和管理
 - 最近 Pin 状态保存，Phase 2
 - 渲染 Pin 内容
+
+Phase 1 托盘边界：只表示应用存活 + `Quit Agent Pin`，不做 Pin 历史恢复。关闭 Pin = 销毁窗口；托盘 Quit = 退出应用并停止 HTTP。
 
 ### packages/cli
 
@@ -169,7 +171,7 @@ Phase 2 必须实现文件系统存储：
 
 MVP 视觉目标：轻、克制、像桌面工具，不像网页后台或数据大屏。
 
-默认风格：
+默认风格（MVP 长期目标）：
 
 - 浅色优先
 - 圆角卡片
@@ -179,6 +181,12 @@ MVP 视觉目标：轻、克制、像桌面工具，不像网页后台或数据�
 - Markdown 阅读体验优先
 - 图片展示干净
 - 可适度使用半透明或轻毛玻璃，但不能影响可读性
+
+Phase 1 视觉退化（Windows WebView2 限制，详见 `docs/ui-style.md` §4）：
+
+- CSS 不做圆角/阴影/毛玻璃（透明背景 + 圆角会露黑边，backdrop-filter 缩放抖动）
+- 窗口用 `WebviewWindowBuilder::shadow(true)` 让 DWM 提供 OS 级圆角+阴影（Win11 有，Win10 退化直角）
+- 移动/缩放时 WebView2 重绘延迟的边缘闪烁属已知限制，Phase 1 接受
 
 避免：
 

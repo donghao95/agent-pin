@@ -20,6 +20,7 @@ HTTP 请求 → 创建独立 Markdown Pin 窗口
 - 每个 Pin 是独立桌面窗口
 - Pin 窗口可拖动、缩放、置顶、关闭
 - 基础错误处理，坏输入不能导致应用崩溃
+- 最小系统托盘：仅表示应用仍在运行，并提供 `Quit Agent Pin` 退出应用
 
 Phase 1 暂不做：
 
@@ -28,9 +29,16 @@ Phase 1 暂不做：
 - status block
 - 多 block 混排
 - 最近 Pin 历史
-- 托盘恢复
+- 托盘的 Pin 历史恢复（Phase 1 托盘不做 Pin 生命周期管理，关闭 Pin = 销毁窗口，不承诺恢复）
 - `GET /api/pins`
 - `show` / `hide` / `hide-all`
+
+Phase 1 托盘边界说明：
+
+- 托盘只负责应用生命周期（显示应用存活 + 退出应用）。
+- 托盘不负责 Pin 生命周期（不做历史列表、不做恢复、不做 hide-all）。
+- 未来如果支持"关闭后还能找回"，应通过独立的管理界面，而不是塞进托盘。
+- 关闭 Pin 窗口 = 销毁该窗口；托盘 Quit = 退出应用并停止 HTTP 服务。
 
 验收命令：
 
@@ -58,8 +66,8 @@ Phase 2 补齐完整 MVP 能力。
 - 最近 Pin 简单历史
 - 关闭后可从托盘重新打开
 - `GET /api/pins`
-- `POST /api/pins/:pinId/show`
-- `POST /api/pins/:pinId/hide`
+- `POST /api/pins/{pinId}/show`
+- `POST /api/pins/{pinId}/hide`
 - `POST /api/pins/hide-all`
 - Agent 使用 skill 文档
 
@@ -79,7 +87,7 @@ CLI 直接使用 Rust 实现，不再使用 Node.js MVP CLI。
 
 MVP 视觉目标：轻、克制、像桌面工具，不像网页后台或数据大屏。
 
-默认风格：
+默认风格（MVP 长期目标）：
 
 - 浅色优先
 - 圆角卡片
@@ -89,6 +97,12 @@ MVP 视觉目标：轻、克制、像桌面工具，不像网页后台或数据�
 - Markdown 阅读体验优先
 - 图片展示干净
 - 可适度使用半透明或轻毛玻璃，但不能影响可读性
+
+Phase 1 视觉退化（Windows WebView2 限制，详见 `docs/ui-style.md` §4）：
+
+- CSS 不做圆角/阴影/毛玻璃（透明背景 + 圆角会露黑边，backdrop-filter 缩放抖动）
+- 窗口用 `shadow(true)` 让 DWM 提供 OS 级圆角+阴影（Win11 有，Win10 退化直角）
+- 移动/缩放时 WebView2 重绘延迟的边缘闪烁属已知限制，Phase 1 接受
 
 避免：
 

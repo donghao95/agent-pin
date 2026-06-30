@@ -23,6 +23,8 @@ Pin 应该像一个轻量桌面贴纸，而不是完整应用窗口。
 - 可适度使用半透明或轻毛玻璃，但不能影响可读性。
 - 交互反馈要轻，不做夸张动画。
 
+注：以上是 MVP 长期目标。Phase 1 受 Windows WebView2 透明窗口限制，圆角/阴影/毛玻璃的 CSS 实现会引发黑边和缩放抖动，Phase 1 采用退化方案（见 §4）。
+
 ## 3. 避免的方向
 
 不要做成：
@@ -50,7 +52,16 @@ Phase 1 的窗口先按以下方式实现：
 - 使用自定义轻标题栏。
 - 标题栏左侧显示 title。
 - 标题栏右侧只放关闭按钮。
-- 标题栏可拖动。
+- 标题栏可拖动（Tauri 2 在 Windows 上 `data-tauri-drag-region` 不可靠，改用 `onMouseDown + startDragging()` 手动触发）。
+
+Phase 1 视觉退化说明（Windows WebView2 限制）：
+
+- 窗口背景：不透明白色（`#ffffff`），不做透明/毛玻璃。透明背景 + 圆角会露出窗口黑色底，且 `backdrop-filter` 在缩放时重绘抖动。
+- 圆角：CSS 不做圆角。依赖 `WebviewWindowBuilder::shadow(true)` 让 DWM 提供 OS 级圆角——Windows 11 有圆角，Windows 10 退化为直角。
+- 阴影：同上，由 DWM 提供 OS 级阴影，Win10 可能无阴影。
+- 残留问题：窗口移动/缩放时 WebView2 重绘延迟仍可能导致边缘闪烁，Phase 1 接受，Phase 2 评估 transparent 窗口或其他合成方案。
+
+Phase 1 验收平台前提：视觉验收以 Windows 11 为准；Windows 10 退化为直角白矩形，属可接受退化。
 
 ## 5. Phase 1 暂不做
 
@@ -68,9 +79,10 @@ Phase 1 不做：
 
 Phase 1 的 Pin 窗口应满足：
 
-- 看起来像桌面贴纸，而不是后台系统窗口。
+- 看起来像桌面贴纸，而不是后台系统窗口（Win11：DWM 圆角+阴影；Win10：直角白矩形，可接受退化）。
 - 内容阅读舒适。
 - 标题栏不抢视觉。
 - 关闭按钮清晰但不突兀。
 - Markdown 标题、列表、代码块在小窗口中可读。
 - 置顶时不显得打扰。
+- 移动/缩放时的边缘闪烁属已知限制，不阻塞 Phase 1 验收。

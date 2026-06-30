@@ -304,11 +304,11 @@ http://127.0.0.1:4317
 
 列出最近 Pin。MVP 可简化。
 
-### POST /api/pins/:pinId/show
+### POST /api/pins/{pinId}/show
 
 重新显示一个已隐藏 Pin。
 
-### POST /api/pins/:pinId/hide
+### POST /api/pins/{pinId}/hide
 
 隐藏一个 Pin。
 
@@ -429,43 +429,11 @@ MVP 不使用数据库，使用文件系统。
 
 ## 16. 实现阶段
 
-### Phase 1：Tauri 骨架
-
-- Tauri 应用可启动
-- 系统托盘
-- 可打开测试窗口
-
-### Phase 2：HTTP + Markdown Pin
-
-- `GET /api/health`
-- `POST /api/pins`
-- 收到 Markdown Pin 后创建独立窗口
-
-### Phase 3：Block 渲染
-
-- 支持 markdown
-- 支持 image
-- 支持 status
-- 支持多 block 混排
-
-### Phase 4：CLI
-
-- `agent-pin health`
-- `agent-pin markdown`
-- `agent-pin image`
-- `agent-pin status`
-- `agent-pin push --file`
-
-### Phase 5：托盘历史
-
-- 最近 Pin
-- 关闭后重新打开
-- 隐藏所有 Pin
-
-### Phase 6：Skill
-
-- 创建 `skills/agent-pin/SKILL.md`
-- 提供使用规则和示例
+> **已由 `docs/phase-plan.md` 取代。**
+>
+> 本节保留的历史版本与最新分期口径不一致（历史版本把"系统托盘"放进 Phase 1，但最新口径把完整托盘能力放在 Phase 2，Phase 1 仅含最小托盘用于应用退出）。
+>
+> 实际分期以 `docs/phase-plan.md` 为准。本节不再维护，仅作历史参考。
 
 ## 17. 验收标准
 

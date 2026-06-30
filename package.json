@@ -1,0 +1,16 @@
+{
+  "name": "agent-pin",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Agent Pin - 让 Agent 把重要内容贴到桌面上",
+  "scripts": {
+    "dev": "pnpm --filter @agent-pin/desktop tauri dev",
+    "build": "pnpm --filter @agent-pin/desktop tauri build",
+    "lint": "pnpm -r run lint || true",
+    "typecheck": "pnpm -r run typecheck"
+  },
+  "packageManager": "pnpm@10.4.0",
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Agent Pin 默认能力。Phase 1 只有 Pin 窗口（label 是动态生成的 pinId），所以用通配符 *。Phase 2 如引入非 Pin 窗口（主窗口/设置窗口），需改为按 label 前缀 pin_* 匹配或拆分 capability，避免权限过宽。","local":true,"windows":["*"],"permissions":["core:window:default","core:window:allow-start-dragging","core:window:allow-close","core:webview:default"]}}

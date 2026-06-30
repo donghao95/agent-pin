@@ -24,11 +24,13 @@ Phase 1 只实现最小闭环：
 Phase 2 再补完整 MVP 的历史和窗口生命周期能力：
 
 - `GET /api/pins`
-- `POST /api/pins/:pinId/show`
-- `POST /api/pins/:pinId/hide`
+- `POST /api/pins/{pinId}/show`
+- `POST /api/pins/{pinId}/hide`
 - `POST /api/pins/hide-all`
 
 历史能力属于完整 MVP，但不阻塞 Phase 1。
+
+注：路径参数使用 `{pinId}` 语法（axum 0.8+）。Phase 1 路由无路径参数，不受影响。
 
 ---
 
@@ -184,14 +186,14 @@ GET /api/pins
 
 ---
 
-## 6. POST /api/pins/:pinId/show
+## 6. POST /api/pins/{pinId}/show
 
 Phase：2
 
 重新显示一个已隐藏 Pin。
 
 ```http
-POST /api/pins/:pinId/show
+POST /api/pins/{pinId}/show
 ```
 
 响应：
@@ -204,14 +206,14 @@ POST /api/pins/:pinId/show
 
 ---
 
-## 7. POST /api/pins/:pinId/hide
+## 7. POST /api/pins/{pinId}/hide
 
 Phase：2
 
 隐藏一个 Pin。关闭窗口时可以复用这个逻辑。
 
 ```http
-POST /api/pins/:pinId/hide
+POST /api/pins/{pinId}/hide
 ```
 
 响应：
