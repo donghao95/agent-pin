@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "title": "CI 失败分析",
+  "blocks": [
+    {
+      "type": "status",
+      "level": "warning",
+      "text": "集成测试失败，疑似数据库迁移或测试环境初始化问题。"
+    },
+    {
+      "type": "markdown",
+      "content": "## 建议下一步\n1. 先确认测试数据库是否干净。\n2. 再检查 migration 是否重复执行。\n3. 最后检查 integration test 是否依赖执行顺序。"
+    }
+  ]
+}
