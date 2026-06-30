@@ -14,7 +14,32 @@ http://127.0.0.1:4317
 
 Agent 应优先使用 CLI，而不是直接写 curl。
 
-## 1. agent-pin health
+## 1. 分期口径
+
+CLI 属于 Phase 2，不阻塞 Phase 1。
+
+Phase 1 只要求 HTTP 能创建 Markdown Pin。Phase 2 再实现 Rust `agent-pin` CLI。
+
+## 2. 技术决策
+
+CLI 直接使用 Rust 实现，不再使用 Node.js MVP CLI。
+
+理由：
+
+- Agent Pin 是本地桌面工具，Rust CLI 更符合长期方向。
+- 可以和 Tauri backend 复用类型、schema 和错误码。
+- 避免后续从 Node.js CLI 迁移到 Rust CLI。
+
+CLI 不应该包含复杂业务逻辑，只负责：
+
+1. 读取参数和文件。
+2. 组装 Pin JSON。
+3. 调用本地 HTTP API。
+4. 输出明确结果。
+
+---
+
+## 3. agent-pin health
 
 检查桌面应用是否运行。
 
@@ -37,7 +62,9 @@ Agent Pin is not running.
 Please start the desktop app first.
 ```
 
-## 2. agent-pin markdown
+---
+
+## 4. agent-pin markdown
 
 创建 Markdown Pin。
 
@@ -64,7 +91,9 @@ agent-pin markdown --title "结论" --text "第一版应该做成 Tauri 桌面 P
 --task "PR Review"
 ```
 
-## 3. agent-pin image
+---
+
+## 5. agent-pin image
 
 创建 Image Pin。
 
@@ -78,7 +107,9 @@ agent-pin image --title "装修效果图" --path ./render.png
 agent-pin image --title "装修效果图" --path ./render.png --caption "入门柜参考图"
 ```
 
-## 4. agent-pin status
+---
+
+## 6. agent-pin status
 
 创建 Status Pin。
 
@@ -95,7 +126,9 @@ warning
 error
 ```
 
-## 5. agent-pin push
+---
+
+## 7. agent-pin push
 
 推送完整 Pin JSON。用于混合内容，例如 Markdown + Image。
 
@@ -123,7 +156,9 @@ agent-pin push --file ./pin.json
 }
 ```
 
-## 6. agent-pin list
+---
+
+## 8. agent-pin list
 
 列出最近 Pin。
 
@@ -138,7 +173,9 @@ pin_20260630_121530_pr_review  PR 审查结果  visible
 pin_20260630_122100_cabinet    装修效果图  hidden
 ```
 
-## 7. agent-pin show
+---
+
+## 9. agent-pin show
 
 重新显示一个已隐藏 Pin。
 
@@ -146,7 +183,9 @@ pin_20260630_122100_cabinet    装修效果图  hidden
 agent-pin show pin_20260630_122100_cabinet
 ```
 
-## 8. agent-pin hide-all
+---
+
+## 10. agent-pin hide-all
 
 隐藏全部当前可见 Pin。
 
@@ -154,7 +193,9 @@ agent-pin show pin_20260630_122100_cabinet
 agent-pin hide-all
 ```
 
-## 9. Endpoint 配置
+---
+
+## 11. Endpoint 配置
 
 默认 endpoint：
 
@@ -168,25 +209,9 @@ http://127.0.0.1:4317
 AGENT_PIN_ENDPOINT=http://127.0.0.1:4318 agent-pin health
 ```
 
-## 10. CLI 实现建议
+---
 
-MVP 可以使用 Node.js 实现 CLI，后续再考虑 Rust 单文件二进制。
-
-原因：
-
-- 处理 Markdown 文件方便
-- 处理 JSON 方便
-- Agent 调试容易
-- 开发速度快
-
-CLI 不应该包含复杂业务逻辑，只负责：
-
-1. 读取参数和文件。
-2. 组装 Pin JSON。
-3. 调用本地 HTTP API。
-4. 输出明确结果。
-
-## 11. Agent 使用原则
+## 12. Agent 使用原则
 
 Agent 使用 CLI 时应尽量：
 
