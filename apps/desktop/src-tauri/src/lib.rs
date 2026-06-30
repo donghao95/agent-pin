@@ -15,6 +15,7 @@
 
 mod http;
 mod pin;
+mod pin_actions;
 mod registry;
 mod storage;
 mod tray;
@@ -24,6 +25,7 @@ mod window;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
+use crate::pin_actions::ShowPinMode;
 use crate::storage::{PinMeta, PinState};
 
 // ---------- invoke 命令 ----------
@@ -44,30 +46,12 @@ fn list_pins() -> Vec<PinMeta> {
 }
 
 /// 管理界面/托盘：显示 Pin（创建窗口）。
-/// 幂等：已 visible 直接返回 Ok。
+/// 管理界面从前端 invoke 进入这里。窗口创建会启动新的 WebView，而新 Pin 窗口
+/// 首屏又会 invoke(get_pin_document)。如果在当前 invoke 内同步 build 新窗口，
+/// 会出现管理页卡住、新窗口空白的 IPC 重入问题。这里先返回，再异步创建窗口。
 #[tauri::command]
 fn show_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
-    let meta = registry::REGISTRY
-        .get_meta(&pin_id)
-        .ok_or_else(|| format!("pin not found: {}", pin_id))?;
-
-    if meta.state == PinState::Visible {
-        return Ok(()); // 幂等
-    }
-
-    // 清理可能的孤儿窗口（state=hidden 但窗口存在）
-    if let Err(e) = window::hide_pin_window(&app, &pin_id) {
-        eprintln!("[agent-pin] show_pin cleanup: {}", e);
-    }
-
-    let doc = registry::REGISTRY
-        .get(&pin_id)
-        .ok_or_else(|| format!("pin doc missing: {}", pin_id))?;
-
-    window::create_pin_window(&app, &pin_id, &doc)?;
-    registry::REGISTRY.set_state(&pin_id, PinState::Visible)?;
-    tray::refresh(&app);
-    Ok(())
+    pin_actions::show_pin(&app, &pin_id, ShowPinMode::AsyncCreate)
 }
 
 /// 管理界面/托盘：隐藏 Pin（destroy 窗口 + state=hidden）。
@@ -157,6 +141,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        // 单实例检查：第二次启动时唤起已有实例（打开管理界面 + 聚焦），然后自身退出。
+        // 必须在 setup 之前注册。放在所有 plugin 之后、setup 之前。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Err(e) = tray::open_manager_window(app) {
+                eprintln!("[agent-pin] single instance open manager: {}", e);
+            }
+        }))
         .setup(|app| {
             // 1. 初始化数据目录 + 加载历史 Pin
             //    init 失败不阻塞启动：持久化失败时仍可创建 Pin（只是不持久化）
@@ -220,7 +211,14 @@ pub fn run() {
                 return Ok(());
             }
 
-            // 4. 启动时静默检查更新（异步、不阻塞、失败忽略）
+            // 4. 启动时自动打开管理界面
+            //    用户启动 app 后能直接看到管理界面，不用先点托盘。
+            //    失败只 eprintln，不阻塞应用（托盘仍可用，用户可手动打开）。
+            if let Err(e) = tray::open_manager_window(app.handle()) {
+                eprintln!("[agent-pin] startup open manager: {}", e);
+            }
+
+            // 5. 启动时静默检查更新（异步、不阻塞、失败忽略）
             //    缓存命中（24h 内）时不会实际请求 GitHub API。
             //    有新版本时刷新托盘，让"检查更新"菜单项显示最新版本提示。
             let app_handle_for_update = app.handle().clone();
@@ -249,9 +247,23 @@ pub fn run() {
             check_for_updates,
         ])
         .on_window_event(|window, event| {
-            // 窗口销毁事件：只在 state=visible 时设 hidden。
+            // 管理界面窗口关闭按钮：拦截 close，改为 hide（缩回托盘，不 destroy）。
+            // 用户点托盘"打开管理界面"重新 show。
+            // 只有托盘"退出 Agent Pin"（app.exit(0)）才真正退出 app。
+            // Pin 窗口不拦截：关闭=destroy+state=hidden（Phase 2-B 设计，可恢复）。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "manager" {
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        eprintln!("[agent-pin] manager hide on close: {}", e);
+                    }
+                    return;
+                }
+            }
+
+            // Pin 窗口销毁事件：只在 state=visible 时设 hidden。
             // 避免与 hide 路由、show 路由清理孤儿窗口、delete_pin 冲突。
-            // 管理界面窗口 label="manager"，不在 registry，忽略。
+            // 管理界面窗口 label="manager" 已被 CloseRequested 拦截，不会到 Destroyed。
             if let tauri::WindowEvent::Destroyed = event {
                 let pin_id = window.label();
                 if pin_id == "manager" {

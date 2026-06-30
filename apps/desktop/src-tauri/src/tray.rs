@@ -14,11 +14,12 @@
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::DialogExt;
 
+use crate::pin_actions::ShowPinMode;
 use crate::registry;
 use crate::storage::PinState;
 use crate::updater;
@@ -44,8 +45,33 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("Agent Pin")
         .menu(&menu)
         .on_menu_event(handle_menu_event)
+        .on_tray_icon_event(|tray, event| {
+            handle_tray_icon_event(tray.app_handle(), event);
+        })
         .build(app)?;
     Ok(())
+}
+
+/// 处理托盘图标点击事件。
+/// 左键单击/双击 → 打开管理界面（与右键菜单"打开管理界面"一致）。
+/// 这是无主窗口托盘应用最核心的入口，用户本能地左键点托盘想恢复主界面。
+fn handle_tray_icon_event(app: &AppHandle, event: TrayIconEvent) {
+    match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        }
+        | TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        } => {
+            if let Err(e) = open_manager_window(app) {
+                eprintln!("[agent-pin] tray icon click open manager: {}", e);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 刷新托盘菜单（重建 + set_menu）。
@@ -145,7 +171,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         _ => {
             // 假设是 pinId（最近 5 快恢入口）
             if id.starts_with("pin_") {
-                if let Err(e) = show_pin_by_id(app, id) {
+                if let Err(e) = crate::pin_actions::show_pin(app, id, ShowPinMode::Sync) {
                     eprintln!("[agent-pin] tray show pin {}: {}", id, e);
                 }
                 refresh(app);
@@ -171,34 +197,18 @@ fn hide_all_visible(app: &AppHandle) {
     }
 }
 
-/// 按 pinId 显示 Pin（托盘快恢用）。
-fn show_pin_by_id(app: &AppHandle, pin_id: &str) -> Result<(), String> {
-    let doc = registry::REGISTRY
-        .get(pin_id)
-        .ok_or_else(|| format!("pin not found: {}", pin_id))?;
-    // 清理可能的孤儿窗口（与 http.rs show_pin 和 lib.rs invoke show_pin 一致）
-    if let Err(e) = crate::window::hide_pin_window(app, pin_id) {
-        eprintln!("[agent-pin] tray show_pin_by_id cleanup for {}: {}", pin_id, e);
-    }
-    crate::window::create_pin_window(app, pin_id, &doc)?;
-    // set_state 失败则回滚：destroy 刚创建的窗口，避免窗口可见但 state=hidden 的不一致
-    if let Err(e) = registry::REGISTRY.set_state(pin_id, PinState::Visible) {
-        if let Err(destroy_err) = crate::window::hide_pin_window(app, pin_id) {
-            eprintln!(
-                "[agent-pin] tray show_pin_by_id rollback for {}: {}",
-                pin_id, destroy_err
-            );
-        }
-        return Err(e);
-    }
-    Ok(())
-}
-
-/// 打开管理界面窗口（已存在则聚焦，不重建）。
-fn open_manager_window(app: &AppHandle) -> tauri::Result<()> {
+/// 打开管理界面窗口（已存在则 show + 聚焦，不重建）。
+/// pub 供 lib.rs setup 启动时调用。
+/// 已存在时调 show()：窗口可能被用户点关闭按钮 hide 了（CloseRequested 拦截）。
+pub fn open_manager_window(app: &AppHandle) -> tauri::Result<()> {
     const LABEL: &str = "manager";
     if let Some(existing) = app.get_webview_window(LABEL) {
-        let _ = existing.set_focus();
+        if let Err(e) = existing.show() {
+            eprintln!("[agent-pin] manager show existing: {}", e);
+        }
+        if let Err(e) = existing.set_focus() {
+            eprintln!("[agent-pin] manager focus existing: {}", e);
+        }
         return Ok(());
     }
     WebviewWindowBuilder::new(
