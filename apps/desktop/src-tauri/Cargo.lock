@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agent-pin-desktop"
 version = "0.1.0"
 dependencies = [
+ "agent-pin-shared",
  "axum",
  "chrono",
  "once_cell",
@@ -24,6 +25,13 @@ dependencies = [
  "tauri-plugin-shell",
  "tokio",
  "tower-http 0.7.0",
+]
+
+[[package]]
+name = "agent-pin-shared"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

@@ -40,9 +40,9 @@ agent-pin/
   skills/agent-pin/     # 给外部 Agent 使用的通用 skill
   prompts/              # 给 Codex / Claude / Trae 的实现提示词
   examples/pins/        # Pin JSON 示例
-  apps/desktop/         # 后续 Tauri 桌面应用
-  packages/cli/         # 后续 agent-pin CLI
-  packages/shared/      # 后续共享类型和校验逻辑
+  apps/desktop/         # Tauri 桌面应用
+  packages/cli/         # agent-pin CLI（Rust）
+  packages/shared/      # 共享类型和校验逻辑（PinDocument 契约）
 ```
 
 ## 关键文档

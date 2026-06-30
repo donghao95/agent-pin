@@ -40,3 +40,6 @@ Thumbs.db
 
 # Local planning / proposal artifacts (not part of source)
 agent-pin-proposal.html
+
+# Rust library crate lock files (library Cargo.lock not committed; binaries' Cargo.lock IS committed)
+packages/shared/Cargo.lock

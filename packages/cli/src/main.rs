@@ -3,7 +3,7 @@
 // Phase 2-C：Rust CLI，Agent 的优先入口。
 // 底层调用本地 HTTP API（http://127.0.0.1:4317），不复制业务逻辑。
 //
-// 命令（docs/cli.md + docs/phase-plan.md Phase 2-C）：
+// 命令（docs/cli.md + docs/06_phase_plan.md Phase 2-C）：
 //   agent-pin health                                              检查桌面应用是否运行
 //   agent-pin markdown --title "..." --file ./review.md           从文件创建 Markdown Pin
 //   agent-pin markdown --title "..." --text "..."                从文本创建 Markdown Pin
@@ -14,17 +14,20 @@
 //   agent-pin show <pinId>                                       重新显示已隐藏 Pin
 //   agent-pin hide-all                                           隐藏全部可见 Pin
 //
-// 架构决策：CLI 自带最小类型（只 derive Serialize 用于组装 JSON）。
-// 未来可抽 packages/shared 复用 PinDocument 类型，但 Phase 2-C 不扩大范围。
+// 类型复用：PinDocument 等类型来自 packages/shared（agent-pin-shared），
+// 与 desktop 后端共用同一套契约，避免类型漂移。
 // push 命令用 serde_json::Value 操作，不强制完整类型，JSON 结构由用户负责（desktop 校验）。
 
 mod client;
 
 use std::path::Path;
 
+use agent_pin_shared::{
+    ImageBlock, MarkdownBlock, PinBlock, PinDocument, PinHeight, PinSource, PinWindowConfig,
+    StatusBlock,
+};
 use clap::{Parser, Subcommand};
-use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use client::Client;
 
@@ -143,71 +146,10 @@ struct PushArgs {
     file: String,
 }
 
-// ---------- PinDocument CLI 类型（只用于序列化） ----------
-// 与 desktop pin.rs 结构一致，但只 derive Serialize。
-// 未来抽 packages/shared 后可直接复用。
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PinDocument {
-    version: u32,
-    title: String,
-    blocks: Vec<PinBlock>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    window: Option<PinWindowConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<PinSource>,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum PinBlock {
-    Markdown(MarkdownBlock),
-    Image(ImageBlock),
-    Status(StatusBlock),
-}
-
-#[derive(Serialize)]
-struct MarkdownBlock {
-    content: String,
-}
-
-#[derive(Serialize)]
-struct ImageBlock {
-    path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    caption: Option<String>,
-}
-
-#[derive(Serialize)]
-struct StatusBlock {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    level: Option<String>,
-    text: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PinWindowConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    width: Option<u32>,
-    /// height 可以是数字或 "auto" 字符串，用 Value 保留原始类型。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    height: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    always_on_top: Option<bool>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PinSource {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workspace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task: Option<String>,
-}
+// ---------- PinDocument CLI 类型 ----------
+// 类型定义复用 packages/shared（agent_pin_shared），避免与 desktop 类型漂移。
+// StatusBlock 未在此处 import：cmd_status 直接构造 shared::PinBlock::Status，
+// 字段名与 shared 一致。
 
 // ---------- main ----------
 
@@ -417,17 +359,20 @@ fn build_pin_doc(title: &str, blocks: Vec<PinBlock>, common: &CommonArgs) -> Pin
         blocks,
         window,
         source,
+        // created_at 由 desktop 后端在持久化时填充，CLI 不设置。
+        created_at: None,
     }
 }
 
 /// 从 CommonArgs 组装窗口配置。无任何窗口参数时返回 None。
 fn build_window_config(common: &CommonArgs) -> Option<PinWindowConfig> {
+    // height 是数字字符串或 "auto"：数字转 PinHeight::Number，其他转 PinHeight::Auto。
+    // desktop 端 validate 会校验 Auto 变体必须恰好是 "auto"。
     let height = common.height.as_ref().map(|h| {
-        // 数字字符串或 "auto"：数字转 Number，其他保留字符串
         if let Ok(n) = h.parse::<u32>() {
-            json!(n)
+            PinHeight::Number(n)
         } else {
-            json!(h)
+            PinHeight::Auto(h.clone())
         }
     });
     let always_on_top = if common.no_always_on_top {
@@ -443,6 +388,9 @@ fn build_window_config(common: &CommonArgs) -> Option<PinWindowConfig> {
     Some(PinWindowConfig {
         width: common.width,
         height,
+        // CLI 不暴露 x/y 定位参数，由 desktop 级联排列。
+        x: None,
+        y: None,
         always_on_top,
     })
 }
@@ -456,6 +404,8 @@ fn build_source(common: &CommonArgs) -> Option<PinSource> {
         agent: common.agent.clone(),
         workspace: common.workspace.clone(),
         task: common.task.clone(),
+        // CLI 不暴露 conversationId 参数，留给直接构造 JSON 的 push 命令。
+        conversation_id: None,
     })
 }
 
