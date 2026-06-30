@@ -326,6 +326,7 @@ Skill 应强调：什么时候应该 pin、什么时候不应该 pin、优先使
 
 ```bash
 pnpm install
+.\scripts\dev.ps1 # Windows 本地调试脚本
 pnpm dev          # 启动 Tauri 开发模式（HTTP + 前端 HMR）
 pnpm build        # 构建生产包
 pnpm lint         # ESLint

@@ -50,5 +50,10 @@ $RECYCLE.BIN/
 # Local planning / proposal artifacts (not part of source)
 agent-pin-proposal.html
 
+# Local debug artifacts
+/-w
+/dev-log*.txt
+/test-minimal.json
+
 # Rust lock files: 提交所有 Cargo.lock（含 lib crate），保证 CI 与本地依赖版本一致。
 # shared 是内部契约 crate 不发版到 crates.io，提交 lockfile 利大于弊。

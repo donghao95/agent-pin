@@ -6,7 +6,8 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: {
-    port: 1420,
+    host: "127.0.0.1", // 强制 IPv4，避免 Windows 上 IPv6 ::1 权限问题（EACCES）
+    port: 1800, // 1420 在 Windows Hyper-V 保留端口范围，换 1800
     strictPort: true,
   },
   envPrefix: ["VITE_", "TAURI_"],

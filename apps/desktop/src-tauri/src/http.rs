@@ -140,72 +140,11 @@ async fn show_pin(
     State(app): State<AppHandle>,
     Path(pin_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // 1. 检查 pin 存在
-    let meta = match crate::registry::REGISTRY.get_meta(&pin_id) {
-        Some(m) => m,
-        None => {
-            return Err(err_response(
-                StatusCode::NOT_FOUND,
-                PinErrorCode::PinNotFound,
-                format!("pin not found: {}", pin_id),
-            ))
-        }
-    };
-
-    // 2. 幂等：已 visible 直接返回 ok
-    if meta.state == PinState::Visible {
-        return Ok(Json(json!({ "ok": true })));
+    if let Err(e) =
+        crate::pin_actions::show_pin(&app, &pin_id, crate::pin_actions::ShowPinMode::Sync)
+    {
+        return Err(show_pin_err_response(e));
     }
-
-    // 3. 从 registry 读 doc（内存中有，无需读磁盘）
-    let doc = match crate::registry::REGISTRY.get(&pin_id) {
-        Some(d) => d,
-        None => {
-            return Err(err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                PinErrorCode::InternalError,
-                format!("pin meta exists but doc missing: {}", pin_id),
-            ))
-        }
-    };
-
-    // 4. 清理可能的孤儿窗口（与 lib.rs invoke show_pin 和 tray.rs show_pin_by_id 一致）。
-    //    window.rs create_pin_window 要求 label 不冲突，孤儿窗口会导致创建失败。
-    if let Err(e) = crate::window::hide_pin_window(&app, &pin_id) {
-        eprintln!(
-            "[agent-pin] show_pin cleanup orphan window for {}: {}",
-            pin_id, e
-        );
-    }
-
-    // 5. 创建窗口
-    if let Err(e) = crate::window::create_pin_window(&app, &pin_id, &doc) {
-        return Err(err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            PinErrorCode::WindowCreateFailed,
-            e,
-        ));
-    }
-
-    // 6. 设状态 visible（失败则回滚：destroy 刚创建的窗口，返回错误）。
-    //    不回滚会导致窗口可见但 state=hidden，托盘快恢列表会列出实际可见的 Pin，
-    //    用户点击会触发对已可见窗口的重复 show，体验混乱。
-    if let Err(e) = crate::registry::REGISTRY.set_state(&pin_id, PinState::Visible) {
-        if let Err(destroy_err) = crate::window::hide_pin_window(&app, &pin_id) {
-            eprintln!(
-                "[agent-pin] show_pin rollback destroy failed for {}: {}",
-                pin_id, destroy_err
-            );
-        }
-        return Err(err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            PinErrorCode::InternalError,
-            e,
-        ));
-    }
-
-    // 7. 刷新托盘菜单（该 Pin 从 hidden 快恢列表移除）
-    crate::tray::refresh(&app);
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -292,5 +231,23 @@ fn err_response(
                 "message": message,
             }
         })),
+    )
+}
+
+fn show_pin_err_response(message: String) -> (StatusCode, Json<Value>) {
+    if message.starts_with("pin not found:") {
+        return err_response(StatusCode::NOT_FOUND, PinErrorCode::PinNotFound, message);
+    }
+    if message.starts_with("failed to create pin window:") {
+        return err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            PinErrorCode::WindowCreateFailed,
+            message,
+        );
+    }
+    err_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        PinErrorCode::InternalError,
+        message,
     )
 }

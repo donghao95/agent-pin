@@ -50,7 +50,8 @@ Agent Pin 是一个本地桌面工具，让 Agent 可以把重要内容像 PixPi
 git clone https://github.com/donghao95/agent-pin.git
 cd agent-pin
 pnpm install
-pnpm dev          # 开发模式
+.\scripts\dev.ps1 # Windows 本地调试脚本
+pnpm dev          # 开发模式（等价的底层命令）
 pnpm build        # 生产构建（输出 NSIS 安装包）
 ```
 

@@ -225,6 +225,12 @@ pin_<timestamp_ms>_<6位随机数字>
 - **Pin 窗口**（label 是 pinId）：`decorations(false)` + `shadow(true)` + 自定义轻标题栏 + `alwaysOnTop=true` + `skipTaskbar=true`
 - **管理界面窗口**（label 固定为 `manager`）：`decorations(true)` 系统装饰 + `resizable(true)` + 880×620 + min 640×400
 
+窗口行为差异：
+
+- **Pin 窗口关闭**：destroy 窗口 + state=hidden（记录保留，可从托盘/管理界面恢复）。Phase 2-B 设计。
+- **管理界面窗口关闭**：拦截 `CloseRequested`，改为 `hide()`（窗口实例保留，不 destroy）。用户点托盘"打开管理界面"重新 `show()`。只有托盘"退出 Agent Pin"（`app.exit(0)`）才真正退出 app。
+- **应用启动**：setup 完成后自动打开管理界面窗口，用户启动即可见。
+
 窗口创建默认参数（Pin 窗口）：
 
 - alwaysOnTop: true

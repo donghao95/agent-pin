@@ -279,6 +279,13 @@ MVP 中 status 是静态展示，不做实时更新。
 - **Pin 窗口**（label 是 pinId）：`decorations(false)` + `shadow(true)` + 自定义轻标题栏 + `alwaysOnTop=true` + `skipTaskbar=true`
 - **管理界面窗口**（label 固定为 `manager`）：`decorations(true)` 系统装饰 + `resizable(true)` + 880×620 + min 640×400
 
+窗口行为：
+
+- Pin 窗口关闭 = destroy + state=hidden（可恢复）
+- 管理界面窗口关闭 = hide（缩回托盘，窗口实例保留）；托盘"打开管理界面"重新 show
+- 应用启动自动打开管理界面窗口
+- 只有托盘"退出 Agent Pin"才退出 app
+
 窗口 label（即 pinId）格式：`pin_<timestamp_ms>_<6位随机数字>`，例如 `pin_1782801843675_717272`。
 
 详细窗口管理设计见 `02_architecture.md` §4。

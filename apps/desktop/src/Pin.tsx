@@ -51,15 +51,18 @@ export default function Pin() {
       setError("missing pinId in URL");
       return;
     }
-    invoke<PinDocument | null>("get_pin_document", { pinId })
-      .then((d) => {
-        if (!d) {
-          setError("pin document not found: " + pinId);
-        } else {
-          setDoc(d);
-        }
-      })
-      .catch((e) => setError(String(e)));
+    const timer = window.setTimeout(() => {
+      invoke<PinDocument | null>("get_pin_document", { pinId })
+        .then((d) => {
+          if (!d) {
+            setError("pin document not found: " + pinId);
+          } else {
+            setDoc(d);
+          }
+        })
+        .catch((e) => setError(String(e)));
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const handleClose = () => {
