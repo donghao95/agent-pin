@@ -235,6 +235,8 @@ export type PinSource = {
 
 支持：本地 PNG、JPG/JPEG、WebP；GIF 可选。
 
+`path` 必须是绝对路径。相对路径解析在 Phase 2-C CLI 实现（CLI 把相对路径转绝对再 POST）。直接通过 HTTP 测试时需传绝对路径。
+
 图片路径不存在时，不应导致应用崩溃，应在 Pin 内显示错误块。
 
 ### Status Block
@@ -407,13 +409,13 @@ MVP 不使用数据库，使用文件系统。
 
 常见错误：
 
-- `INVALID_JSON`
-- `INVALID_PIN_DOCUMENT`
-- `UNSUPPORTED_BLOCK_TYPE`
-- `IMAGE_NOT_FOUND`
-- `IMAGE_UNSUPPORTED`
-- `WINDOW_CREATE_FAILED`
-- `INTERNAL_ERROR`
+- `INVALID_JSON`：JSON 解析失败或未知 block type（serde 反序列化阶段拒绝）
+- `INVALID_PIN_DOCUMENT`：version/title/blocks 非空/path 绝对路径/level 枚举校验失败
+- `UNSUPPORTED_BLOCK_TYPE`：保留，当前未知 type 走 `INVALID_JSON`
+- `IMAGE_NOT_FOUND`：保留，HTTP 层不校验文件存在性，前端 `<img>` onerror 兜底
+- `IMAGE_UNSUPPORTED`：图片扩展名非 PNG/JPG/JPEG/WebP/GIF
+- `WINDOW_CREATE_FAILED`：窗口创建失败
+- `INTERNAL_ERROR`：内部错误
 
 统一错误响应：
 

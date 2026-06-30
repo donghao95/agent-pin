@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Agent Pin 默认能力。Phase 1 只有 Pin 窗口（label 是动态生成的 pinId），所以用通配符 *。Phase 2 如引入非 Pin 窗口（主窗口/设置窗口），需改为按 label 前缀 pin_* 匹配或拆分 capability，避免权限过宽。",
+  "description": "Agent Pin 默认能力。Phase 1 只有 Pin 窗口（label 是动态生成的 pinId），所以用通配符 *。Phase 2 如引入非 Pin 窗口（主窗口/设置窗口），需改为按 label 前缀 pin_* 匹配或拆分 capability，避免权限过宽。asset protocol 访问本地图片由 tauri.conf.json 的 assetProtocol.scope 控制，不需要 capability 权限。",
   "windows": ["*"],
   "permissions": [
     "core:window:default",

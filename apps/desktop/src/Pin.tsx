@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -30,6 +30,9 @@ type PinDocument = {
     | { type: "status"; level?: string; text: string }
   >;
 };
+
+// status block 的 level 类型
+type StatusLevel = "info" | "success" | "warning" | "error";
 
 export default function Pin() {
   const [doc, setDoc] = useState<PinDocument | null>(null);
@@ -123,7 +126,22 @@ export default function Pin() {
               </div>
             );
           }
-          // Phase 1 只支持 markdown；image/status 由 Phase 2 补齐
+          if (block.type === "image") {
+            return (
+              <ImageBlock key={i} path={block.path} caption={block.caption} />
+            );
+          }
+          if (block.type === "status") {
+            // 后端已校验 level，但防御性白名单校验避免持久化数据被篡改时注入任意 className
+            const level = isStatusLevel(block.level) ? block.level : "info";
+            return (
+              <div className={`pin-block pin-status pin-status-${level}`} key={i}>
+                <span className="pin-status-icon">{statusIcon(level)}</span>
+                <span className="pin-status-text">{block.text}</span>
+              </div>
+            );
+          }
+          // 未知 block 类型兜底，不静默吞错
           return (
             <div className="pin-block pin-unsupported" key={i}>
               unsupported block type: {block.type}
@@ -131,6 +149,49 @@ export default function Pin() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// status level 对应的图标（用文字符号，避免引入图标库）
+function statusIcon(level: StatusLevel): string {
+  switch (level) {
+    case "success":
+      return "✓";
+    case "warning":
+      return "!";
+    case "error":
+      return "✕";
+    case "info":
+    default:
+      return "i";
+  }
+}
+
+// ImageBlock：用 convertFileSrc 把绝对路径转 asset:// URL，由 Tauri asset protocol 加载。
+// 图片不存在/加载失败时显示错误块，不崩溃（docs/mvp-spec.md §9）。
+function ImageBlock({ path, caption }: { path: string; caption?: string }) {
+  const [failed, setFailed] = useState(false);
+  const src = convertFileSrc(path);
+
+  if (failed) {
+    return (
+      <div className="pin-block pin-image-error">
+        <div className="pin-image-error-title">图片加载失败</div>
+        <div className="pin-image-error-path" title={path}>{path}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pin-block pin-image">
+      <img
+        src={src}
+        alt={caption ?? ""}
+        onError={() => setFailed(true)}
+        loading="lazy"
+      />
+      {caption && <div className="pin-image-caption">{caption}</div>}
     </div>
   );
 }

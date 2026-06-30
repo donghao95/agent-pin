@@ -253,11 +253,13 @@ POST /api/pins/hide-all
 - `version` 必须为 `1`
 - `title` 必须存在且非空
 - `blocks` 必须存在且至少一个 block
-- block type 必须是 `markdown`、`image` 或 `status`
-- Phase 1 只要求实现 `markdown` block
+- block type 必须是 `markdown`、`image` 或 `status`（未知 type 在反序列化阶段被拒绝，返回 `INVALID_JSON`）
 - markdown block 的 `content` 必须非空
-- image block 的 `path` 必须存在；若图片不存在，建议在 Pin 内显示错误 block，不要让应用崩溃
+- image block 的 `path` 必须非空且为绝对路径（相对路径解析由 Phase 2-C CLI 处理）
+- image block 的 `path` 扩展名必须是 PNG/JPG/JPEG/WebP/GIF 之一（否则 `IMAGE_UNSUPPORTED`）
+- image block 的文件存在性不校验：desktop 不知道 Agent cwd，前端 `<img>` onerror 显示错误块
 - status block 的 `text` 必须非空
+- status block 的 `level` 若存在，必须是 `info`/`success`/`warning`/`error` 之一
 
 ---
 

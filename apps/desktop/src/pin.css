@@ -211,6 +211,121 @@ body {
   border-radius: 4px;
 }
 
+/* ---------- Image Block ---------- */
+
+.pin-image {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.pin-image img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+}
+
+.pin-image-caption {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #646a73;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.pin-image-error {
+  padding: 10px 12px;
+  background: #fff1f0;
+  border: 1px solid #ffccc7;
+  border-radius: 6px;
+}
+
+.pin-image-error-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cf1322;
+  margin-bottom: 4px;
+}
+
+.pin-image-error-path {
+  font-size: 11px;
+  color: #8a8f99;
+  word-break: break-all;
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+/* ---------- Status Block ---------- */
+
+.pin-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pin-status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  font-style: normal;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.pin-status-text {
+  flex: 1;
+  word-break: break-word;
+}
+
+/* info: 浅蓝 */
+.pin-status-info {
+  background: #e6f4ff;
+  color: #0958d9;
+}
+.pin-status-info .pin-status-icon {
+  background: #1677ff;
+  color: #fff;
+}
+
+/* success: 浅绿 */
+.pin-status-success {
+  background: #f6ffed;
+  color: #389e0d;
+}
+.pin-status-success .pin-status-icon {
+  background: #52c41a;
+  color: #fff;
+}
+
+/* warning: 浅黄 */
+.pin-status-warning {
+  background: #fffbe6;
+  color: #ad6800;
+}
+.pin-status-warning .pin-status-icon {
+  background: #faad14;
+  color: #fff;
+}
+
+/* error: 浅红 */
+.pin-status-error {
+  background: #fff1f0;
+  color: #cf1322;
+}
+.pin-status-error .pin-status-icon {
+  background: #ff4d4f;
+  color: #fff;
+}
+
 /* ---------- 滚动条 ---------- */
 
 .pin-body::-webkit-scrollbar {

@@ -52,26 +52,66 @@ curl -X POST http://127.0.0.1:4317/api/pins \
 
 ## Phase 2：完整 MVP
 
-Phase 2 补齐完整 MVP 能力。
+Phase 2 补齐完整 MVP 能力。拆分为 4 个子阶段，按顺序推进：
+
+### Phase 2-A：Block 扩展
 
 必须做：
 
-- 系统托盘
-- Rust `agent-pin` CLI
-- `markdown` / `image` / `status` blocks
-- 一个 Pin 可以包含多个 block
+- `image` block（本地图片绝对路径）
+- `status` block（`info` / `success` / `warning` / `error`）
+- 一个 Pin 可以包含多个 block 混排
 - Markdown 支持标题、列表、引用、代码块、链接、Markdown 表格
-- Image 支持本地图片路径
-- Status 支持 `info` / `success` / `warning` / `error`
-- 最近 Pin 简单历史
-- 关闭后可从托盘重新打开
+- 图片路径不存在时，在 Pin 内显示错误块，不崩溃
+- image block 的 `path` 必须是绝对路径（相对路径解析留给 Phase 2-C CLI 实现）
+
+暂不做：历史、持久化、托盘扩展、CLI、show/hide/hide-all、GET /api/pins。
+
+### Phase 2-B：持久化 + 历史 + 生命周期
+
+必须做：
+
+- 文件系统持久化（`~/.agent-pin/pins/` + `state.json`，见 `docs/architecture.md` §5）
 - `GET /api/pins`
 - `POST /api/pins/{pinId}/show`
 - `POST /api/pins/{pinId}/hide`
 - `POST /api/pins/hide-all`
-- Agent 使用 skill 文档
+- 关闭 Pin 后可恢复（混合方案，见下方）
+- 应用重启后历史仍在
 
-历史能力属于完整 MVP：Pin 关闭后不能直接消失，必须保留记录并可恢复。
+关闭后恢复入口（混合方案）：
+
+- 托盘右键菜单列最近 5 个 Pin，点击快速重新打开（快恢）。
+- 独立管理界面窗口负责完整历史、搜索、删除、设置（完整管理）。
+- 托盘只做应用存活 + 快恢入口 + 退出应用；Pin 完整生命周期管理走管理界面。
+- 此方案修正了早期文档"关闭后从托盘重新打开"的表述：托盘不是完整历史入口，只是快恢入口。
+
+### Phase 2-C：Rust agent-pin CLI
+
+必须做：
+
+- `agent-pin health`
+- `agent-pin markdown --title "..." --file ./review.md`
+- `agent-pin markdown --title "..." --text "..."`
+- `agent-pin image --title "..." --path ./image.png --caption "..."`
+- `agent-pin status --title "..." --level success --text "..."`
+- `agent-pin push --file ./pin.json`
+- `agent-pin list`
+- `agent-pin show <pinId>`
+- `agent-pin hide-all`
+- CLI 把相对路径转绝对路径再 POST 给 HTTP（解决 image path 相对于 Agent cwd 的问题）
+
+CLI 底层调用 `http://127.0.0.1:4317`，不复制业务逻辑。
+
+### Phase 2-D：Skill 文档
+
+必须做：
+
+- 创建 `skills/agent-pin/SKILL.md`
+- 提供使用规则和示例
+- 强调什么时候应该 pin、什么时候不应该 pin
+
+历史能力属于完整 MVP：Pin 关闭后不能直接消失，必须保留记录并可恢复（Phase 2-B 实现）。
 
 ## CLI 技术决策
 

@@ -88,7 +88,34 @@ Desktop 校验 PinDocument
 前端渲染 Markdown
 ```
 
-### Phase 2：CLI 创建 Pin
+### Phase 2-A：image block 渲染
+
+```text
+POST /api/pins (含 image block, path 是绝对路径)
+  ↓
+Desktop 校验 PinDocument（含扩展名白名单）
+  ↓
+创建 Pin 窗口
+  ↓
+前端 get_pin_document 取数据
+  ↓
+前端 convertFileSrc(path) 把绝对路径转 Tauri asset protocol URL
+  (Windows/Linux: http://asset.localhost/<encoded-path>；macOS: asset://localhost/<path>)
+  ↓
+WebView 通过 Tauri asset protocol 加载本地图片
+  ↓
+图片不存在/格式不支持 → <img> onerror → 显示错误块
+```
+
+image path 规则：
+
+- HTTP 接收的 `path` 必须是绝对路径。
+- 扩展名必须是 PNG/JPG/JPEG/WebP/GIF 之一（`ImageUnsupported` 错误）。
+- 不校验文件存在性：desktop 不知道 Agent cwd，前端 `<img>` onerror 处理。
+- 相对路径解析在 Phase 2-C CLI 实现：CLI 把相对路径转绝对再 POST。
+- 直接用 curl 测试时，调用者需传绝对路径。
+
+### Phase 2-C：CLI 创建 Pin
 
 ```text
 agent-pin markdown --title "PR 审查结果" --file review.md
@@ -97,14 +124,12 @@ CLI 读取 review.md
   ↓
 CLI POST /api/pins
   ↓
-Desktop 校验 PinDocument
-  ↓
-保存到 ~/.agent-pin/pins/
+Desktop 校验 PinDocument（持久化由 Phase 2-B 已实现）
   ↓
 创建 Pin 窗口
 ```
 
-### Phase 2：关闭 Pin
+### Phase 2-B：关闭 Pin
 
 ```text
 用户关闭窗口
@@ -113,13 +138,13 @@ Desktop 校验 PinDocument
   ↓
 state.json 更新 visible=false
   ↓
-托盘最近列表仍保留
+托盘最近 5 列表 + 管理界面仍保留
 ```
 
-### Phase 2：重新打开 Pin
+### Phase 2-B：重新打开 Pin
 
 ```text
-用户从托盘点击最近 Pin
+用户从托盘右键最近 5 列表点击，或打开管理界面选择
   ↓
 读取 pins/<pinId>.json
   ↓
@@ -153,17 +178,17 @@ MVP 不做复杂窗口吸附和透明度。
 
 Phase 1 可以不实现历史存储，只保证窗口可创建。
 
-Phase 2 必须实现文件系统存储：
+Phase 2-B 必须实现文件系统存储：
 
 ```text
-~/.agent-pin/
+~/.agent-pin/           # Windows: %USERPROFILE%\.agent-pin\
   inbox/
   pins/
   failed/
   state.json
 ```
 
-历史能力属于完整 MVP：Pin 关闭后不能直接消失，必须可恢复。
+历史能力属于完整 MVP：Pin 关闭后不能直接消失，必须可恢复（Phase 2-B 实现）。
 
 ---
 
