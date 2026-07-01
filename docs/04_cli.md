@@ -151,7 +151,7 @@ agent-pin push --file ./pin.json
     },
     {
       "type": "image",
-      "path": "C:/Users/hao/Desktop/cabinet.png",
+      "path": "C:/Users/<username>/Desktop/cabinet.png",
       "caption": "入门柜效果图"
     }
   ]

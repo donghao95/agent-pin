@@ -12,9 +12,9 @@
 // - 启动时加载 state.json 到内存 registry；pins/{pinId}.json 在 show 时按需读取。
 // - 坏 state.json 不阻塞应用启动，降级为空状态并 eprintln。
 //
-// Phase 2-B 不实现 inbox/ 和 failed/ 目录（architecture.md §5 留给未来场景）。
+// Phase 2-B 不实现 inbox/ 和 failed/ 目录（docs/02_architecture.md §5 留给未来场景）。
 //
-// 契约来源：docs/architecture.md §5、docs/phase-plan.md Phase 2-B
+// 契约来源：docs/02_architecture.md §5、docs/06_phase_plan.md Phase 2-B
 
 use std::fs;
 use std::path::PathBuf;

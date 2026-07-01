@@ -4,6 +4,24 @@
   "version": "0.1.0",
   "description": "Agent Pin - 让 Agent 把重要内容贴到桌面上",
   "license": "Apache-2.0",
+  "author": "Agent Pin Contributors",
+  "homepage": "https://github.com/donghao95/agent-pin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/donghao95/agent-pin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/donghao95/agent-pin/issues"
+  },
+  "keywords": [
+    "tauri",
+    "rust",
+    "desktop",
+    "agent",
+    "pin",
+    "cli",
+    "local-first"
+  ],
   "scripts": {
     "dev": "pnpm --filter @agent-pin/desktop tauri dev",
     "build": "pnpm --filter @agent-pin/desktop tauri build",

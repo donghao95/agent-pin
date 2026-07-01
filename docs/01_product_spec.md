@@ -238,7 +238,7 @@ HTTP 请求体总大小上限为 1 MB（`03_api.md` §4）。
 ```json
 {
   "type": "image",
-  "path": "C:/Users/hao/Desktop/example.png",
+  "path": "C:/Users/<username>/Desktop/example.png",
   "caption": "错误截图"
 }
 ```

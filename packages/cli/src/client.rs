@@ -11,7 +11,7 @@
 // - HTTP 错误响应体格式：{"ok":false,"error":{"code":"...","message":"..."}}
 //   成功响应体格式：{"ok":true,...}
 //
-// 契约来源：docs/api.md §2 通用响应格式
+// 契约来源：docs/03_api.md §2 通用响应格式
 
 use serde_json::{json, Value};
 

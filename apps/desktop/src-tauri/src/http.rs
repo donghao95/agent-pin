@@ -12,7 +12,7 @@
 // 请求体大小限制：1MB（Markdown 足够，图片走本地路径不走 HTTP body）。
 // 错误处理：坏输入返回统一错误响应，不 panic。
 //
-// 契约来源：docs/api.md
+// 契约来源：docs/03_api.md
 // 路径参数使用 axum 0.8+ 的 {pinId} 语法（不是 :pinId）。
 
 use axum::extract::Request;

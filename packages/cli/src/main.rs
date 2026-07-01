@@ -3,7 +3,7 @@
 // Phase 2-C：Rust CLI，Agent 的优先入口。
 // 底层调用本地 HTTP API（http://127.0.0.1:4317），不复制业务逻辑。
 //
-// 命令（docs/cli.md + docs/06_phase_plan.md Phase 2-C）：
+// 命令（docs/04_cli.md + docs/06_phase_plan.md Phase 2-C）：
 //   agent-pin health                                              检查桌面应用是否运行
 //   agent-pin markdown --title "..." --file ./review.md           从文件创建 Markdown Pin
 //   agent-pin markdown --title "..." --text "..."                从文本创建 Markdown Pin

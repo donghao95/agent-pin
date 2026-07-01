@@ -1,10 +1,10 @@
 /* Agent Pin - Pin 窗口样式
- * 视觉目标：轻、克制、像桌面贴纸（参考 docs/ui-style.md）
+ * 视觉目标：轻、克制、像桌面贴纸（参考 docs/05_ui_style.md）
  * Phase 1 实现：窗口层面（.pin-root/body）不做 CSS 圆角/阴影/毛玻璃。
  *   原因：Windows WebView2 透明背景 + 圆角会露黑边，backdrop-filter 缩放抖动。
  *   圆角/阴影由 DWM 通过 WebviewWindowBuilder::shadow(true) 提供（Win11 有，Win10 退化直角）。
  *   元素级圆角（按钮、代码块、滚动条等）保留，不影响窗口合成。
- *   详见 docs/ui-style.md §4 Phase 1 视觉退化说明。
+ *   详见 docs/05_ui_style.md §4 Phase 1 视觉退化说明。
  *
  * 全局重置（* / html / body / #root）在 index.css，Manager 窗口也共用（M10）。
  */
@@ -16,7 +16,7 @@
   background: #ffffff;
   /* Phase 1 不做 CSS 圆角/阴影/毛玻璃。
      圆角/阴影由 DWM 通过 shadow(true) 提供（Win11 有，Win10 退化直角）。
-     详见 docs/ui-style.md §4 Phase 1 视觉退化说明。 */
+     详见 docs/05_ui_style.md §4 Phase 1 视觉退化说明。 */
   overflow: hidden;
 }
 

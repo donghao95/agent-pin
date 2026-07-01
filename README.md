@@ -119,7 +119,7 @@ agent-pin/
 
 ## 开发
 
-参与开发请先读 [AGENTS.md](AGENTS.md)（项目宪法）与 [CONTRIBUTING.md](CONTRIBUTING.md)。
+参与开发请先读 [AGENTS.md](AGENTS.md)（项目宪法）与 [CONTRIBUTING.md](CONTRIBUTING.md)。请遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
 提交前本地检查：
 
