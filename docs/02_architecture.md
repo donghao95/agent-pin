@@ -212,9 +212,8 @@ set_state(visible) → registry emit `pins:changed`
 hide_pin_window 销毁窗口（如果存在）
   ↓
 registry.remove(pinId)：
-  - 删 pins/{pinId}.json 文件
-  - 从内存 registry 移除
-  - 更新 state.json
+  - 从内存 registry 移除 + 更新 state.json（同一锁内，失败则回滚内存）
+  - 释放锁后删 pins/{pinId}.json 文件（best-effort，失败仅日志）
   - registry emit `pins:changed`
   ↓
 托盘/管理界面 listen 收到事件自动刷新
@@ -329,7 +328,7 @@ Phase 2-B 实现文件系统存储：
 
 - 创建 Pin：先写 `pins/{pinId}.json`，再更新 `state.json`（原子写：先写 `.tmp` 再 rename）
 - 状态变更（show/hide）：只更新 `state.json` 的 `state` 和 `updatedAt` 字段
-- 删除 Pin：先删 `pins/{pinId}.json`，再更新 `state.json`
+- 删除 Pin：先更新 `state.json`（内存移除 + 持久化，同一锁内失败回滚），再删 `pins/{pinId}.json`（best-effort，失败仅日志）
 
 启动加载（`load_from_disk`）：
 

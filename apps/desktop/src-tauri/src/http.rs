@@ -325,3 +325,99 @@ async fn csrf_guard(req: Request, next: Next) -> Response {
     }
     next.run(req).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pin_actions::ShowPinError;
+
+    // ---------- health ----------
+
+    #[tokio::test]
+    async fn test_health_returns_ok_with_version() {
+        let Json(val) = health().await;
+        assert_eq!(val["ok"], json!(true));
+        assert_eq!(val["app"], json!("Agent Pin"));
+        // version 字段存在且非空
+        let version = val["version"].as_str().expect("version must be string");
+        assert!(!version.is_empty());
+    }
+
+    // ---------- err_response ----------
+
+    #[test]
+    fn test_err_response_status_and_body() {
+        let (status, Json(body)) = err_response(
+            StatusCode::BAD_REQUEST,
+            PinErrorCode::InvalidJson,
+            "invalid JSON: unexpected token".to_string(),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["ok"], json!(false));
+        assert_eq!(body["error"]["code"], json!("INVALID_JSON"));
+        assert_eq!(
+            body["error"]["message"],
+            json!("invalid JSON: unexpected token")
+        );
+    }
+
+    #[test]
+    fn test_err_response_internal_error() {
+        let (status, Json(body)) = err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            PinErrorCode::InternalError,
+            "disk full".to_string(),
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], json!("INTERNAL_ERROR"));
+    }
+
+    #[test]
+    fn test_err_response_pin_not_found() {
+        let (status, Json(body)) = err_response(
+            StatusCode::NOT_FOUND,
+            PinErrorCode::PinNotFound,
+            "pin not found: pin_123".to_string(),
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], json!("PIN_NOT_FOUND"));
+    }
+
+    // ---------- show_pin_err_response ----------
+
+    #[test]
+    fn test_show_pin_err_response_not_found() {
+        let (status, Json(body)) =
+            show_pin_err_response(ShowPinError::NotFound("pin not found: pin_123".into()));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], json!("PIN_NOT_FOUND"));
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("pin_123"));
+    }
+
+    #[test]
+    fn test_show_pin_err_response_failed() {
+        let (status, Json(body)) =
+            show_pin_err_response(ShowPinError::Failed("pin is in failed state".into()));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], json!("INTERNAL_ERROR"));
+    }
+
+    #[test]
+    fn test_show_pin_err_response_window_create() {
+        let (status, Json(body)) =
+            show_pin_err_response(ShowPinError::WindowCreate("webview creation failed".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], json!("WINDOW_CREATE_FAILED"));
+    }
+
+    #[test]
+    fn test_show_pin_err_response_internal() {
+        let (status, Json(body)) =
+            show_pin_err_response(ShowPinError::Internal("set_state failed".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], json!("INTERNAL_ERROR"));
+    }
+}

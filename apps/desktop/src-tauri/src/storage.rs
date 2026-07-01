@@ -88,30 +88,65 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// 数据目录：~/.agent-pin/
+/// 返回用户 home 目录（带 fallback）。
 /// home_dir 几乎不可能为 None（Windows 总有 USERPROFILE，Unix 总有 HOME）。
 /// 若真为 None，eprintln 警告并 fallback 到当前目录，避免静默写入意外位置。
+///
+/// production I/O 函数（init/load_state/save_state 等）转发到 _to/_for 版本时
+/// 传此函数结果（home 目录），与 data_dir_for(root) 语义一致（root 当 home）。
+/// 测试传 tempdir（充当 home），实现测试隔离。
+///
+/// 注意：不要传 data_dir() 给 _to/_for 版本——data_dir_for(root) 的语义是
+/// "root 当 home，返回 root/.agent-pin"，传 data_dir()（已是 ~/.agent-pin）
+/// 会导致路径多套一层 .agent-pin（B1 bug）。
+pub(crate) fn home_or_fallback() -> PathBuf {
+    home_dir().unwrap_or_else(|| {
+        eprintln!("[agent-pin] HOME/USERPROFILE not set, falling back to current directory");
+        PathBuf::from(".")
+    })
+}
+
+/// 数据目录：~/.agent-pin/
 /// 不返回 Result 是为了避免所有调用方（init/load/save/delete）都要处理 Err，
 /// 实际 None 场景下后续 I/O 会自然失败并被调用方的错误处理捕获。
 pub fn data_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| {
-            eprintln!("[agent-pin] HOME/USERPROFILE not set, falling back to current directory");
-            PathBuf::from(".")
-        })
-        .join(".agent-pin")
+    home_or_fallback().join(".agent-pin")
+}
+
+/// 在指定 root 下计算数据目录路径（测试用）。
+/// production 代码调 data_dir()（读 HOME 环境变量），测试调 data_dir_for(tempdir)
+/// 避免污染真实文件系统或并发测试串扰（env var 是进程级全局）。
+pub(crate) fn data_dir_for(root: &std::path::Path) -> PathBuf {
+    root.join(".agent-pin")
 }
 
 pub fn pins_dir() -> PathBuf {
     data_dir().join("pins")
 }
 
+/// 在指定 root 下计算 pins 目录路径（测试用）。
+pub(crate) fn pins_dir_for(root: &std::path::Path) -> PathBuf {
+    data_dir_for(root).join("pins")
+}
+
+#[allow(dead_code)]
 pub fn state_file_path() -> PathBuf {
     data_dir().join("state.json")
 }
 
+/// 在指定 root 下计算 state.json 路径（测试用）。
+pub(crate) fn state_file_path_for(root: &std::path::Path) -> PathBuf {
+    data_dir_for(root).join("state.json")
+}
+
+#[allow(dead_code)]
 pub fn pin_file_path(pin_id: &str) -> PathBuf {
     pins_dir().join(format!("{}.json", pin_id))
+}
+
+/// 在指定 root 下计算 pin doc 路径（测试用）。
+pub(crate) fn pin_file_path_for(root: &std::path::Path, pin_id: &str) -> PathBuf {
+    pins_dir_for(root).join(format!("{}.json", pin_id))
 }
 
 /// 校验 pin_id 格式，防路径穿越和保留 label 滥用（m2）。
@@ -152,7 +187,12 @@ pub fn validate_pin_id(pin_id: &str) -> Result<(), String> {
 /// 初始化数据目录（启动时调用）。
 /// 创建 ~/.agent-pin/pins/，state.json 在首次 save 时创建。
 pub fn init() -> std::io::Result<()> {
-    fs::create_dir_all(pins_dir())?;
+    init_to(&home_or_fallback())
+}
+
+/// 在指定 root 下初始化数据目录（测试用）。
+pub(crate) fn init_to(root: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(pins_dir_for(root))?;
     Ok(())
 }
 
@@ -163,7 +203,12 @@ pub fn init() -> std::io::Result<()> {
 /// - 解析失败：eprintln + 返回空 StateFile（坏 state.json 不阻塞启动）
 /// - 读取失败（非 NotFound）：eprintln + 返回空 StateFile
 pub fn load_state() -> StateFile {
-    let path = state_file_path();
+    load_state_from(&home_or_fallback())
+}
+
+/// 在指定 root 下加载 state.json（测试用）。
+pub(crate) fn load_state_from(root: &std::path::Path) -> StateFile {
+    let path = state_file_path_for(root);
     match fs::read_to_string(&path) {
         Ok(s) => match serde_json::from_str::<StateFile>(&s) {
             Ok(state) => state,
@@ -191,7 +236,12 @@ pub fn load_state() -> StateFile {
 /// 保存 state.json（原子写：先写 .tmp，fsync，再 rename）。
 /// 失败时 eprintln 并返回 Err，调用方决定是否重试或降级。
 pub fn save_state(state: &StateFile) -> std::io::Result<()> {
-    let path = state_file_path();
+    save_state_to(&home_or_fallback(), state)
+}
+
+/// 在指定 root 下保存 state.json（测试用）。
+pub(crate) fn save_state_to(root: &std::path::Path, state: &StateFile) -> std::io::Result<()> {
+    let path = state_file_path_for(root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -207,7 +257,16 @@ pub fn save_state(state: &StateFile) -> std::io::Result<()> {
 
 /// 保存单个 Pin 的 PinDocument 到 pins/{pinId}.json（原子写 + fsync）。
 pub fn save_pin_doc(pin_id: &str, doc: &PinDocument) -> std::io::Result<()> {
-    let path = pin_file_path(pin_id);
+    save_pin_doc_to(&home_or_fallback(), pin_id, doc)
+}
+
+/// 在指定 root 下保存 PinDocument（测试用）。
+pub(crate) fn save_pin_doc_to(
+    root: &std::path::Path,
+    pin_id: &str,
+    doc: &PinDocument,
+) -> std::io::Result<()> {
+    let path = pin_file_path_for(root, pin_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -221,7 +280,12 @@ pub fn save_pin_doc(pin_id: &str, doc: &PinDocument) -> std::io::Result<()> {
 /// 读取单个 Pin 的 PinDocument。
 /// 文件不存在或解析失败返回 None，解析失败额外 eprintln。
 pub fn load_pin_doc(pin_id: &str) -> Option<PinDocument> {
-    let path = pin_file_path(pin_id);
+    load_pin_doc_from(&home_or_fallback(), pin_id)
+}
+
+/// 在指定 root 下读取 PinDocument（测试用）。
+pub(crate) fn load_pin_doc_from(root: &std::path::Path, pin_id: &str) -> Option<PinDocument> {
+    let path = pin_file_path_for(root, pin_id);
     let s = match fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -251,7 +315,12 @@ pub fn load_pin_doc(pin_id: &str) -> Option<PinDocument> {
 
 /// 删除单个 Pin 文件。文件不存在不算错误（幂等）。
 pub fn delete_pin_doc(pin_id: &str) -> std::io::Result<()> {
-    let path = pin_file_path(pin_id);
+    delete_pin_doc_from(&home_or_fallback(), pin_id)
+}
+
+/// 在指定 root 下删除 Pin 文件（测试用）。
+pub(crate) fn delete_pin_doc_from(root: &std::path::Path, pin_id: &str) -> std::io::Result<()> {
+    let path = pin_file_path_for(root, pin_id);
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -331,5 +400,143 @@ mod tests {
         let state = StateFile::default();
         assert_eq!(state.version, 1);
         assert!(state.pins.is_empty());
+    }
+
+    #[test]
+    fn test_production_forwarding_path_consistency() {
+        // B1 防护：production I/O 函数转发到 _to/_for 版本时传 home_or_fallback()，
+        // data_dir_for(home) = home/.agent-pin 必须等于 data_dir() = home_or_fallback().join(".agent-pin")。
+        // 若有人误把转发参数改回 data_dir()，data_dir_for(data_dir()) = data_dir()/.agent-pin，
+        // 此测试会失败，防止 B1 路径叠加 bug 再次发生。
+        let home = home_or_fallback();
+        assert_eq!(
+            data_dir_for(&home),
+            data_dir(),
+            "data_dir_for(home) must equal data_dir() — production forwarding broken"
+        );
+    }
+
+    // ---------- P1: 持久化 I/O 测试（用 data_dir_for 注入 tempdir） ----------
+
+    /// 辅助：构造临时 root 目录，测试结束后自动清理。
+    fn with_temp_root(f: impl FnOnce(&std::path::Path)) {
+        let tmp = std::env::temp_dir().join(format!(
+            "agent-pin-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        f(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_init_creates_pins_dir() {
+        with_temp_root(|root| {
+            init_to(root).expect("init should succeed");
+            assert!(pins_dir_for(root).exists(), "pins dir should be created");
+        });
+    }
+
+    #[test]
+    fn test_save_and_load_state_roundtrip() {
+        with_temp_root(|root| {
+            let state = StateFile {
+                version: 1,
+                pins: vec![PinMeta {
+                    pin_id: "pin_123_000001".to_string(),
+                    title: "Test".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-02T00:00:00Z".to_string(),
+                    state: PinState::Hidden,
+                    source: None,
+                }],
+            };
+            save_state_to(root, &state).expect("save should succeed");
+
+            let loaded = load_state_from(root);
+            assert_eq!(loaded.version, 1);
+            assert_eq!(loaded.pins.len(), 1);
+            assert_eq!(loaded.pins[0].pin_id, "pin_123_000001");
+            assert_eq!(loaded.pins[0].title, "Test");
+            assert_eq!(loaded.pins[0].state, PinState::Hidden);
+        });
+    }
+
+    #[test]
+    fn test_load_state_missing_file_returns_default() {
+        with_temp_root(|root| {
+            let loaded = load_state_from(root);
+            assert_eq!(loaded.version, 1);
+            assert!(loaded.pins.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_load_state_corrupt_json_returns_default() {
+        with_temp_root(|root| {
+            std::fs::create_dir_all(data_dir_for(root)).unwrap();
+            std::fs::write(state_file_path_for(root), "{ not valid json").unwrap();
+
+            let loaded = load_state_from(root);
+            assert_eq!(loaded.version, 1);
+            assert!(loaded.pins.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_save_and_load_pin_doc_roundtrip() {
+        with_temp_root(|root| {
+            let doc = PinDocument {
+                version: 1,
+                title: "Test Pin".to_string(),
+                blocks: vec![crate::pin::PinBlock::Markdown(crate::pin::MarkdownBlock {
+                    content: "## Hello".to_string(),
+                })],
+                window: None,
+                source: None,
+                created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            };
+            save_pin_doc_to(root, "pin_123_000001", &doc).expect("save should succeed");
+
+            let loaded = load_pin_doc_from(root, "pin_123_000001");
+            assert!(loaded.is_some());
+            let loaded = loaded.unwrap();
+            assert_eq!(loaded.title, "Test Pin");
+        });
+    }
+
+    #[test]
+    fn test_load_pin_doc_missing_returns_none() {
+        with_temp_root(|root| {
+            assert!(load_pin_doc_from(root, "pin_nonexistent").is_none());
+        });
+    }
+
+    #[test]
+    fn test_load_pin_doc_corrupt_returns_none() {
+        with_temp_root(|root| {
+            std::fs::create_dir_all(pins_dir_for(root)).unwrap();
+            std::fs::write(pin_file_path_for(root, "pin_123_000001"), "{ broken").unwrap();
+
+            assert!(load_pin_doc_from(root, "pin_123_000001").is_none());
+        });
+    }
+
+    #[test]
+    fn test_delete_pin_doc_idempotent() {
+        with_temp_root(|root| {
+            std::fs::create_dir_all(pins_dir_for(root)).unwrap();
+            // 删除不存在的文件应返回 Ok（幂等）
+            assert!(delete_pin_doc_from(root, "pin_nonexistent").is_ok());
+
+            // 删除已存在的文件
+            let path = pin_file_path_for(root, "pin_123_000001");
+            std::fs::write(&path, "{}").unwrap();
+            assert!(delete_pin_doc_from(root, "pin_123_000001").is_ok());
+            assert!(!path.exists());
+        });
     }
 }

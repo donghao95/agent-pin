@@ -85,12 +85,66 @@ pub struct PinEntry {
 
 pub struct PinRegistry {
     inner: Mutex<HashMap<String, PinEntry>>,
+    /// 测试用 root：Some 时所有 I/O 写入该目录，None 时走 storage::data_dir()。
+    /// production 代码用 new()（root=None），测试用 with_root(tempdir)。
+    root: Option<std::path::PathBuf>,
 }
 
 impl PinRegistry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            root: None,
+        }
+    }
+
+    /// 测试用构造器：所有持久化 I/O 写入 root 目录。
+    /// production 代码用 new()，测试用 with_root(tempdir) 避免污染真实文件系统。
+    #[cfg(test)]
+    pub fn with_root(root: std::path::PathBuf) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            root: Some(root),
+        }
+    }
+
+    /// 根据是否有 root 返回 storage 模块对应的 save_pin_doc 函数。
+    /// 无 root 调 production 版，有 root 调测试版。
+    fn save_pin_doc(&self, pin_id: &str, doc: &PinDocument) -> std::io::Result<()> {
+        match &self.root {
+            None => storage::save_pin_doc(pin_id, doc),
+            Some(root) => storage::save_pin_doc_to(root, pin_id, doc),
+        }
+    }
+
+    fn delete_pin_doc(&self, pin_id: &str) -> std::io::Result<()> {
+        match &self.root {
+            None => storage::delete_pin_doc(pin_id),
+            Some(root) => storage::delete_pin_doc_from(root, pin_id),
+        }
+    }
+
+    fn load_state(&self) -> storage::StateFile {
+        match &self.root {
+            None => storage::load_state(),
+            Some(root) => storage::load_state_from(root),
+        }
+    }
+
+    fn load_pin_doc(&self, pin_id: &str) -> Option<PinDocument> {
+        match &self.root {
+            None => storage::load_pin_doc(pin_id),
+            Some(root) => storage::load_pin_doc_from(root, pin_id),
+        }
+    }
+
+    fn persist_state(&self, inner: &HashMap<String, PinEntry>) -> std::io::Result<()> {
+        let mut pins: Vec<PinMeta> = inner.values().map(|e| e.meta.clone()).collect();
+        pins.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        let state = StateFile { version: 1, pins };
+        match &self.root {
+            None => storage::save_state(&state),
+            Some(root) => storage::save_state_to(root, &state),
         }
     }
 
@@ -105,7 +159,7 @@ impl PinRegistry {
     /// 管理界面看到或删除它（管理界面读内存 list()，而内存会在重启后从 state.json 重建）。
     pub fn insert(&self, pin_id: String, doc: PinDocument) -> Result<PinMeta, String> {
         // 1. 先写 doc（失败则不插入内存，避免内存与磁盘不一致）
-        if let Err(e) = storage::save_pin_doc(&pin_id, &doc) {
+        if let Err(e) = self.save_pin_doc(&pin_id, &doc) {
             return Err(format!("failed to save pin doc: {}", e));
         }
 
@@ -122,10 +176,10 @@ impl PinRegistry {
         );
 
         // 3. 写 state（失败则回滚：移除内存 entry，释放锁后删 doc 文件）
-        if let Err(e) = persist_state_locked(&inner) {
+        if let Err(e) = self.persist_state(&inner) {
             inner.remove(&pin_id);
             drop(inner); // 释放锁后再做文件 I/O，避免持锁阻塞其他操作
-            if let Err(del_err) = storage::delete_pin_doc(&pin_id) {
+            if let Err(del_err) = self.delete_pin_doc(&pin_id) {
                 eprintln!(
                     "[agent-pin] rollback delete_pin_doc failed for {}: {}",
                     pin_id, del_err
@@ -190,7 +244,7 @@ impl PinRegistry {
         entry.meta.state = state;
         entry.meta.updated_at = now_iso();
 
-        if let Err(e) = persist_state_locked(&inner) {
+        if let Err(e) = self.persist_state(&inner) {
             eprintln!(
                 "[agent-pin] failed to save state.json after set_state (rolling back memory): {}",
                 e
@@ -231,7 +285,7 @@ impl PinRegistry {
                 None => return Ok(()), // 幂等：不存在直接返回
             };
 
-            if let Err(e) = persist_state_locked(&inner) {
+            if let Err(e) = self.persist_state(&inner) {
                 // 回滚：把 entry 放回内存，保持内存与磁盘（旧 state.json）一致
                 inner.insert(pin_id.to_string(), entry);
                 eprintln!(
@@ -243,7 +297,7 @@ impl PinRegistry {
         }
 
         // 4. 释放锁后删 doc 文件（best-effort，失败仅日志，不影响删除结果）
-        if let Err(e) = storage::delete_pin_doc(pin_id) {
+        if let Err(e) = self.delete_pin_doc(pin_id) {
             eprintln!(
                 "[agent-pin] failed to delete pin doc after state.json removed (orphan file left): {} (pin_id={})",
                 e, pin_id
@@ -288,7 +342,7 @@ impl PinRegistry {
     /// 理由：重启后突然出现一堆窗口可能打扰用户；主动恢复更可控。
     /// 满足 phase-plan.md "应用重启后历史仍在"——历史在 state.json，用户可恢复。
     pub fn load_from_disk(&self) {
-        let state = storage::load_state();
+        let state = self.load_state();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.clear();
 
@@ -314,7 +368,7 @@ impl PinRegistry {
             }
 
             // 加载 doc
-            let doc = match storage::load_pin_doc(&meta.pin_id) {
+            let doc = match self.load_pin_doc(&meta.pin_id) {
                 Some(d) => d,
                 None => {
                     eprintln!(
@@ -345,7 +399,7 @@ impl PinRegistry {
         }
 
         if changed {
-            if let Err(e) = persist_state_locked(&inner) {
+            if let Err(e) = self.persist_state(&inner) {
                 eprintln!(
                     "[agent-pin] failed to save state.json after load_from_disk: {}",
                     e
@@ -385,16 +439,6 @@ fn build_meta(pin_id: &str, doc: &PinDocument, state: PinState) -> PinMeta {
         state,
         source: doc.source.clone(),
     }
-}
-
-/// 从内存 entries 重新生成 state.json 并保存。
-/// pins 按 createdAt 升序排列（最早的在前），查询最近时反转。
-/// 调用方必须持有锁。
-fn persist_state_locked(inner: &HashMap<String, PinEntry>) -> std::io::Result<()> {
-    let mut pins: Vec<PinMeta> = inner.values().map(|e| e.meta.clone()).collect();
-    pins.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-    let state = StateFile { version: 1, pins };
-    storage::save_state(&state)
 }
 
 // ---------- 测试 ----------
@@ -480,5 +524,316 @@ mod tests {
         // created_at 应回退到当前时间（非空）
         assert!(!meta.created_at.is_empty());
         assert_eq!(meta.state, PinState::Hidden);
+    }
+
+    // ---------- P1: 持久化与回滚测试（用 with_root 注入 tempdir） ----------
+
+    /// 辅助：构造临时 root 目录，测试结束后自动清理。
+    fn with_temp_root(f: impl FnOnce(&std::path::Path)) {
+        let tmp = std::env::temp_dir().join(format!(
+            "agent-pin-reg-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        f(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 辅助：构造最小 PinDocument。
+    fn make_doc(title: &str) -> PinDocument {
+        PinDocument {
+            version: 1,
+            title: title.to_string(),
+            blocks: vec![crate::pin::PinBlock::Markdown(crate::pin::MarkdownBlock {
+                content: "## content".to_string(),
+            })],
+            window: None,
+            source: None,
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_insert_persists_to_disk() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let pin_id = "pin_100_000001".to_string();
+            let doc = make_doc("Test Insert");
+
+            let meta = reg.insert(pin_id.clone(), doc.clone()).expect("insert ok");
+            assert_eq!(meta.pin_id, pin_id);
+            assert_eq!(meta.state, PinState::Visible);
+
+            // 内存可读
+            assert!(reg.get(&pin_id).is_some());
+            // doc 文件落盘（用 _for 版本验证 root 下的路径，不能用 production 版 pin_file_path）
+            assert!(
+                storage::pin_file_path_for(root, &pin_id).exists(),
+                "doc file should be on disk"
+            );
+            assert!(
+                storage::state_file_path_for(root).exists(),
+                "state.json should be on disk"
+            );
+        });
+    }
+
+    #[test]
+    fn test_insert_then_load_from_disk_recovers() {
+        with_temp_root(|root| {
+            // 第一次：插入一个 Pin
+            {
+                let reg = PinRegistry::with_root(root.to_path_buf());
+                reg.insert("pin_200_000001".to_string(), make_doc("First"))
+                    .expect("insert ok");
+                reg.set_state("pin_200_000001", PinState::Hidden)
+                    .expect("set_state ok");
+            }
+
+            // 第二次：新 registry 实例从同一 root 加载
+            let reg2 = PinRegistry::with_root(root.to_path_buf());
+            reg2.load_from_disk();
+
+            let list = reg2.list();
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].pin_id, "pin_200_000001");
+            // hidden 状态保留
+            assert_eq!(list[0].state, PinState::Hidden);
+        });
+    }
+
+    #[test]
+    fn test_load_from_disk_converts_visible_to_hidden() {
+        with_temp_root(|root| {
+            // 手工构造 state.json，含一个 visible 状态的 Pin
+            let state = storage::StateFile {
+                version: 1,
+                pins: vec![storage::PinMeta {
+                    pin_id: "pin_300_000001".to_string(),
+                    title: "Visible Pin".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    state: PinState::Visible,
+                    source: None,
+                }],
+            };
+            storage::save_state_to(root, &state).expect("save state");
+
+            // 同时写一个 pin doc，让 load_from_disk 能读到
+            storage::save_pin_doc_to(root, "pin_300_000001", &make_doc("Visible Pin"))
+                .expect("save doc");
+
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.load_from_disk();
+
+            let list = reg.list();
+            assert_eq!(list.len(), 1);
+            // visible 必须转为 hidden（重启后窗口实际不可见）
+            assert_eq!(list[0].state, PinState::Hidden);
+        });
+    }
+
+    #[test]
+    fn test_load_from_disk_missing_doc_marks_failed() {
+        with_temp_root(|root| {
+            // state.json 引用一个 Pin，但 pins/{pinId}.json 不存在
+            let state = storage::StateFile {
+                version: 1,
+                pins: vec![storage::PinMeta {
+                    pin_id: "pin_400_000001".to_string(),
+                    title: "Orphan".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    state: PinState::Hidden,
+                    source: None,
+                }],
+            };
+            storage::save_state_to(root, &state).expect("save state");
+
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.load_from_disk();
+
+            let list = reg.list();
+            assert_eq!(list.len(), 1);
+            // doc 缺失，标 failed
+            assert_eq!(list[0].state, PinState::Failed);
+        });
+    }
+
+    #[test]
+    fn test_load_from_disk_skips_invalid_pin_id() {
+        with_temp_root(|root| {
+            // state.json 含一个非法 pin_id（路径穿越），load_from_disk 必须跳过
+            let state = storage::StateFile {
+                version: 1,
+                pins: vec![
+                    storage::PinMeta {
+                        pin_id: "pin_500_000001".to_string(),
+                        title: "Valid".to_string(),
+                        created_at: "2026-01-01T00:00:00Z".to_string(),
+                        updated_at: "2026-01-01T00:00:00Z".to_string(),
+                        state: PinState::Hidden,
+                        source: None,
+                    },
+                    storage::PinMeta {
+                        pin_id: "../evil".to_string(),
+                        title: "Evil".to_string(),
+                        created_at: "2026-01-02T00:00:00Z".to_string(),
+                        updated_at: "2026-01-02T00:00:00Z".to_string(),
+                        state: PinState::Hidden,
+                        source: None,
+                    },
+                ],
+            };
+            storage::save_state_to(root, &state).expect("save state");
+            storage::save_pin_doc_to(root, "pin_500_000001", &make_doc("Valid")).expect("save doc");
+
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.load_from_disk();
+
+            let list = reg.list();
+            // 只加载合法的 Pin，非法的被跳过
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].pin_id, "pin_500_000001");
+        });
+    }
+
+    #[test]
+    fn test_set_state_visible_to_hidden_roundtrip() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_600_000001".to_string(), make_doc("Toggle"))
+                .expect("insert ok");
+
+            // visible → hidden
+            reg.set_state("pin_600_000001", PinState::Hidden)
+                .expect("set hidden");
+            assert_eq!(
+                reg.get_meta("pin_600_000001").unwrap().state,
+                PinState::Hidden
+            );
+
+            // hidden → visible
+            reg.set_state("pin_600_000001", PinState::Visible)
+                .expect("set visible");
+            assert_eq!(
+                reg.get_meta("pin_600_000001").unwrap().state,
+                PinState::Visible
+            );
+        });
+    }
+
+    #[test]
+    fn test_set_state_nonexistent_returns_err() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let err = reg
+                .set_state("pin_nonexistent", PinState::Hidden)
+                .unwrap_err();
+            assert!(err.contains("pin not found"));
+        });
+    }
+
+    #[test]
+    fn test_remove_deletes_pin() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_700_000001".to_string(), make_doc("To Delete"))
+                .expect("insert ok");
+            assert!(reg.get("pin_700_000001").is_some());
+
+            reg.remove("pin_700_000001").expect("remove ok");
+            assert!(reg.get("pin_700_000001").is_none());
+            assert!(reg.get_meta("pin_700_000001").is_none());
+            // doc 文件也应被删除
+            assert!(
+                !storage::pin_file_path_for(root, "pin_700_000001").exists(),
+                "doc file should be deleted after remove"
+            );
+        });
+    }
+
+    #[test]
+    fn test_remove_nonexistent_is_idempotent() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 删除不存在的 Pin 应返回 Ok（幂等）
+            assert!(reg.remove("pin_nonexistent").is_ok());
+        });
+    }
+
+    #[test]
+    fn test_remove_invalid_pin_id_returns_err() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 路径穿越 pin_id 必须拒绝
+            assert!(reg.remove("../evil").is_err());
+        });
+    }
+
+    #[test]
+    fn test_list_sorted_by_created_at_desc() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 故意按乱序插入，created_at 不同
+            let doc1 = PinDocument {
+                version: 1,
+                title: "Earlier".to_string(),
+                blocks: vec![],
+                window: None,
+                source: None,
+                created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            };
+            let doc2 = PinDocument {
+                version: 1,
+                title: "Later".to_string(),
+                blocks: vec![],
+                window: None,
+                source: None,
+                created_at: Some("2026-02-01T00:00:00Z".to_string()),
+            };
+            reg.insert("pin_800_000001".to_string(), doc1)
+                .expect("insert");
+            reg.insert("pin_800_000002".to_string(), doc2)
+                .expect("insert");
+
+            let list = reg.list();
+            assert_eq!(list.len(), 2);
+            // 降序：Later 在前
+            assert_eq!(list[0].title, "Later");
+            assert_eq!(list[1].title, "Earlier");
+        });
+    }
+
+    #[test]
+    fn test_list_recent_hidden_filters_and_truncates() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 插入 3 个 Pin：2 个 hidden，1 个 visible
+            reg.insert("pin_900_000001".to_string(), make_doc("Hidden 1"))
+                .expect("insert");
+            reg.insert("pin_900_000002".to_string(), make_doc("Hidden 2"))
+                .expect("insert");
+            reg.insert("pin_900_000003".to_string(), make_doc("Visible 1"))
+                .expect("insert");
+
+            reg.set_state("pin_900_000001", PinState::Hidden)
+                .expect("set hidden");
+            reg.set_state("pin_900_000002", PinState::Hidden)
+                .expect("set hidden");
+            // pin_900_000003 保持 visible
+
+            // 只返回 hidden，n=5 但只有 2 个 hidden
+            let recent = reg.list_recent_hidden(5);
+            assert_eq!(recent.len(), 2);
+            assert!(recent.iter().all(|m| m.state == PinState::Hidden));
+
+            // n=1 截断
+            let recent1 = reg.list_recent_hidden(1);
+            assert_eq!(recent1.len(), 1);
+        });
     }
 }

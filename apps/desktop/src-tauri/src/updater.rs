@@ -401,4 +401,63 @@ mod tests {
             VersionCmp::Lt
         );
     }
+
+    // ---------- is_cache_fresh ----------
+
+    #[test]
+    fn test_is_cache_fresh_just_checked() {
+        // 刚写入的缓存（当前时间）必须 fresh
+        let cache = UpdateCache {
+            last_checked_at: now_rfc3339(),
+            latest_version: "0.1.1".to_string(),
+        };
+        assert!(is_cache_fresh(&cache), "cache just written must be fresh");
+    }
+
+    #[test]
+    fn test_is_cache_fresh_within_24h() {
+        // 1 小时前检查的缓存，仍在 24h 内
+        let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+        let cache = UpdateCache {
+            last_checked_at: one_hour_ago.to_rfc3339(),
+            latest_version: "0.1.1".to_string(),
+        };
+        assert!(is_cache_fresh(&cache), "cache within 24h must be fresh");
+    }
+
+    #[test]
+    fn test_is_cache_fresh_expired_25h() {
+        // 25 小时前的缓存，已过期
+        let twenty_five_hours_ago = chrono::Utc::now() - chrono::Duration::hours(25);
+        let cache = UpdateCache {
+            last_checked_at: twenty_five_hours_ago.to_rfc3339(),
+            latest_version: "0.1.1".to_string(),
+        };
+        assert!(
+            !is_cache_fresh(&cache),
+            "cache older than 24h must not be fresh"
+        );
+    }
+
+    #[test]
+    fn test_is_cache_fresh_invalid_timestamp() {
+        // 非法时间字符串：必须返回 false（不 fresh），避免解析失败时误判为 fresh
+        let cache = UpdateCache {
+            last_checked_at: "not a timestamp".to_string(),
+            latest_version: "0.1.1".to_string(),
+        };
+        assert!(
+            !is_cache_fresh(&cache),
+            "invalid timestamp must not be fresh"
+        );
+    }
+
+    #[test]
+    fn test_is_cache_fresh_empty_timestamp() {
+        let cache = UpdateCache {
+            last_checked_at: "".to_string(),
+            latest_version: "0.1.1".to_string(),
+        };
+        assert!(!is_cache_fresh(&cache), "empty timestamp must not be fresh");
+    }
 }
