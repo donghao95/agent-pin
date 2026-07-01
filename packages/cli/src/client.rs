@@ -98,7 +98,14 @@ impl Client {
 /// 非 JSON 响应或缺 error.message 时保留原始内容（截断到 500 字节避免过长）。
 fn parse_error_response(code: u16, resp: ureq::Response) -> String {
     let raw = resp.into_string().unwrap_or_default();
-    let body: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+    parse_error_body(code, &raw)
+}
+
+/// 解析错误响应体的纯逻辑（IO 解耦，便于测试）。
+/// 错误响应格式：{"ok":false,"error":{"code":"...","message":"..."}}
+/// 非 JSON 响应或缺 error.message 时保留原始内容（按 char 边界截断到 500 字节避免过长）。
+fn parse_error_body(code: u16, raw: &str) -> String {
+    let body: Value = serde_json::from_str(raw).unwrap_or_else(|_| json!({}));
     let error_msg = body
         .get("error")
         .and_then(|e| e.get("message"))
@@ -118,7 +125,7 @@ fn parse_error_response(code: u16, resp: ureq::Response) -> String {
             }
             &raw[..end]
         } else {
-            &raw
+            raw
         };
         format!("[{}] (HTTP {} raw: {})", error_code, code, truncated)
     } else {
@@ -173,7 +180,8 @@ fn validate_endpoint(endpoint: &str) -> Result<(), String> {
         .ok_or_else(|| format!("endpoint must have a host: {}", endpoint))?;
 
     match host.to_lowercase().as_str() {
-        "127.0.0.1" | "localhost" | "::1" => {}
+        // url::Url::host_str() 对 IPv6 返回带方括号的形式 "[::1]"，而非 "::1"
+        "127.0.0.1" | "localhost" | "[::1]" => {}
         _ => {
             return Err(format!(
                 "endpoint host '{}' is not allowed: only 127.0.0.1, localhost, ::1 are permitted (local-only)",
@@ -194,4 +202,194 @@ fn validate_endpoint(endpoint: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- validate_endpoint ----------
+
+    #[test]
+    fn validate_endpoint_accepts_default_local() {
+        assert!(validate_endpoint("http://127.0.0.1:4317").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_accepts_localhost() {
+        assert!(validate_endpoint("http://localhost:4317").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_accepts_ipv6_loopback() {
+        // url::Url::host_str() 对 IPv6 返回 "[::1]"，validate_endpoint 已适配
+        assert!(validate_endpoint("http://[::1]:4317").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_accepts_custom_port() {
+        assert!(validate_endpoint("http://127.0.0.1:8080").is_ok());
+        assert!(validate_endpoint("http://127.0.0.1:1").is_ok());
+        assert!(validate_endpoint("http://127.0.0.1:65535").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_accepts_uppercase_localhost() {
+        // m11：大小写不敏感匹配 host
+        assert!(validate_endpoint("http://LOCALHOST:4317").is_ok());
+        assert!(validate_endpoint("http://Localhost:4317").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_accepts_trailing_slash() {
+        // url::Url::parse 把 "http://127.0.0.1:4317/" 的 path 规范化为 "/"
+        assert!(validate_endpoint("http://127.0.0.1:4317/").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_https_scheme() {
+        let err = validate_endpoint("https://127.0.0.1:4317").unwrap_err();
+        assert!(err.contains("scheme must be http"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_other_schemes() {
+        assert!(validate_endpoint("ftp://127.0.0.1:4317").is_err());
+        assert!(validate_endpoint("file:///etc/passwd").is_err());
+        assert!(validate_endpoint("ws://127.0.0.1:4317").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_non_loopback_host() {
+        // 私网、公网、0.0.0.0 都必须拒绝（SSRF 防护核心）
+        assert!(validate_endpoint("http://192.168.1.1:4317").is_err());
+        assert!(validate_endpoint("http://10.0.0.1:4317").is_err());
+        assert!(validate_endpoint("http://0.0.0.0:4317").is_err());
+        assert!(validate_endpoint("http://evil.com:4317").is_err());
+        assert!(validate_endpoint("http://example.com").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_userinfo_injection() {
+        // 防 SSRF：http://127.0.0.1@evil.com 会被 url crate 解析为 host=evil.com
+        // 但有 userinfo 就直接拒绝，双重防御
+        let err = validate_endpoint("http://127.0.0.1@evil.com:4317").unwrap_err();
+        assert!(err.contains("userinfo"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_path() {
+        let err = validate_endpoint("http://127.0.0.1:4317/api/pins").unwrap_err();
+        assert!(err.contains("path"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_query() {
+        let err = validate_endpoint("http://127.0.0.1:4317?x=1").unwrap_err();
+        assert!(err.contains("query"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_fragment() {
+        let err = validate_endpoint("http://127.0.0.1:4317#frag").unwrap_err();
+        assert!(err.contains("fragment"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_invalid_url() {
+        assert!(validate_endpoint("not a url").is_err());
+        assert!(validate_endpoint("http://").is_err());
+        assert!(validate_endpoint("://no-scheme").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_accepts_uppercase_scheme() {
+        // url crate 把 scheme 规范化为小写，validate_endpoint 的 scheme 比较不漏大小写
+        // 固化该行为：用户输入大写 HTTP 也能用
+        assert!(validate_endpoint("HTTP://127.0.0.1:4317").is_ok());
+        assert!(validate_endpoint("Http://localhost:4317").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_decimal_ip_normalized_to_loopback() {
+        // 经典 SSRF 向量：十进制 IP 2130706433 = 127.0.0.1
+        // url crate 会规范化为 host_str="127.0.0.1"，被白名单接受
+        // 固化该行为：若未来 url crate 升级改变规范化逻辑，测试会捕获回归
+        // （无论规范化后接受还是不规范化时拒绝，都不会导致 SSRF，但行为必须稳定）
+        let result = validate_endpoint("http://2130706433:4317");
+        assert!(
+            result.is_ok(),
+            "expected url crate to normalize decimal IP to 127.0.0.1, got: {:?}",
+            result
+        );
+    }
+
+    // ---------- parse_error_body ----------
+
+    #[test]
+    fn parse_error_body_standard_error_response() {
+        let raw = r#"{"ok":false,"error":{"code":"VALIDATION_ERROR","message":"title is empty"}}"#;
+        let result = parse_error_body(400, raw);
+        assert_eq!(result, "[VALIDATION_ERROR] title is empty (HTTP 400)");
+    }
+
+    #[test]
+    fn parse_error_body_non_json_response() {
+        let raw = "Internal Server Error";
+        let result = parse_error_body(500, raw);
+        // 非 JSON：error_code 回退为 UNKNOWN，展示原始内容
+        assert!(result.contains("[UNKNOWN]"), "got: {}", result);
+        assert!(result.contains("HTTP 500"), "got: {}", result);
+        assert!(result.contains("Internal Server Error"), "got: {}", result);
+    }
+
+    #[test]
+    fn parse_error_body_missing_message_field() {
+        // 只有 code 没有 message：error_code 取到 "INTERNAL"，走 truncation 分支
+        let raw = r#"{"ok":false,"error":{"code":"INTERNAL"}}"#;
+        let result = parse_error_body(500, raw);
+        assert!(result.contains("[INTERNAL]"), "got: {}", result);
+        assert!(result.contains("HTTP 500"), "got: {}", result);
+        // 缺 message 时展示原始 raw 内容
+        assert!(result.contains("raw:"), "got: {}", result);
+    }
+
+    #[test]
+    fn parse_error_body_missing_error_object() {
+        // 完全没有 error 字段
+        let raw = r#"{"ok":false}"#;
+        let result = parse_error_body(422, raw);
+        assert!(result.contains("[UNKNOWN]"), "got: {}", result);
+        assert!(result.contains("HTTP 422"), "got: {}", result);
+    }
+
+    #[test]
+    fn parse_error_body_empty_raw() {
+        let result = parse_error_body(502, "");
+        assert!(result.contains("[UNKNOWN]"), "got: {}", result);
+        assert!(result.contains("HTTP 502"), "got: {}", result);
+    }
+
+    #[test]
+    fn parse_error_body_truncates_long_raw() {
+        // 超过 500 字节的非 JSON 内容必须截断，避免日志爆炸
+        let raw = "X".repeat(1000);
+        let result = parse_error_body(500, &raw);
+        assert!(result.contains("HTTP 500"), "got: {}", result);
+        // 截断后不应包含完整的 1000 个 X
+        assert!(
+            !result.contains(&"X".repeat(600)),
+            "raw content not truncated"
+        );
+    }
+
+    #[test]
+    fn parse_error_body_truncation_respects_char_boundary() {
+        // 多字节字符（中文）在 500 字节边界截断时不能产生 panic 或乱码
+        // 每个中文字符 3 字节 UTF-8，构造长度接近 500 的中文串
+        let chinese = "中".repeat(200); // 600 字节
+        let result = parse_error_body(500, &chinese);
+        // 不 panic 即通过；且仍包含 HTTP 标记
+        assert!(result.contains("HTTP 500"), "got: {}", result);
+    }
 }
