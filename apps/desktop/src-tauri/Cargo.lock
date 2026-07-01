@@ -24,7 +24,9 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
+ "tempfile",
  "tokio",
+ "tower",
  "tower-http 0.7.0",
  "ureq",
 ]

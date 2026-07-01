@@ -420,4 +420,96 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"]["code"], json!("INTERNAL_ERROR"));
     }
+
+    // ---------- csrf_guard 中间件 ----------
+
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    /// 构造带 csrf_guard 中间件的测试 Router。
+    /// 不带 state（Router<()>），因为 csrf_guard 只读 headers 不需要 AppHandle。
+    fn csrf_test_router() -> Router {
+        Router::new()
+            .route("/test", post(|| async { "ok" }).get(|| async { "ok" }))
+            .layer(middleware::from_fn(csrf_guard))
+    }
+
+    /// 发送模拟请求到 csrf_test_router，返回响应。
+    async fn send_csrf_request(method: Method, host: &str, content_type: Option<&str>) -> Response {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri("/test")
+            .header("host", host);
+        if let Some(ct) = content_type {
+            builder = builder.header("content-type", ct);
+        }
+        csrf_test_router()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_allows_json_post() {
+        // 合法 POST：Host 白名单 + Content-Type: application/json → 放行
+        let resp =
+            send_csrf_request(Method::POST, "127.0.0.1:4317", Some("application/json")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_allows_json_post_localhost() {
+        // localhost 也在 Host 白名单中
+        let resp =
+            send_csrf_request(Method::POST, "localhost:4317", Some("application/json")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_allows_json_with_charset() {
+        // application/json; charset=utf-8 是 RFC 7231 标准带 charset 的合法形式，
+        // ureq/reqwest 默认会这样发。csrf_guard 用 starts_with 放行，此测试锁定该行为。
+        let resp = send_csrf_request(
+            Method::POST,
+            "127.0.0.1:4317",
+            Some("application/json; charset=utf-8"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_rejects_text_plain() {
+        // text/plain 是简单请求（不发 preflight），必须拒绝防 CSRF
+        let resp = send_csrf_request(Method::POST, "127.0.0.1:4317", Some("text/plain")).await;
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_rejects_missing_content_type() {
+        // 缺少 Content-Type 的 POST 必须拒绝
+        let resp = send_csrf_request(Method::POST, "127.0.0.1:4317", None).await;
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_rejects_bad_host() {
+        // m1 防御纵深：非白名单 Host 拒绝（防 DNS rebinding）
+        let resp = send_csrf_request(Method::POST, "evil.com:4317", Some("application/json")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_skips_get() {
+        // GET 请求不校验 Host 和 Content-Type（CSRF 只针对状态变更的 POST）
+        let resp = send_csrf_request(Method::GET, "evil.com", None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_rejects_empty_host() {
+        // 空 Host（头缺失时 unwrap_or("")）也必须拒绝
+        let resp = send_csrf_request(Method::POST, "", Some("application/json")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
 }
