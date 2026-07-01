@@ -154,8 +154,8 @@ Phase 1 暂不做：
 - 最近 Pin 简单历史
 - 关闭后可从托盘重新打开
 - `GET /api/pins`
-- `POST /api/pins/:pinId/show`
-- `POST /api/pins/:pinId/hide`
+- `POST /api/pins/{pinId}/show`
+- `POST /api/pins/{pinId}/hide`
 - `POST /api/pins/hide-all`
 - Agent 使用 skill 文档
 

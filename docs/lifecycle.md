@@ -80,8 +80,8 @@ Phase 2 可以实现：
 - 最近 Pin 列表
 - 重新打开已关闭 Pin
 - `GET /api/pins`
-- `POST /api/pins/:pinId/show`
-- `POST /api/pins/:pinId/hide`
+- `POST /api/pins/{pinId}/show`
+- `POST /api/pins/{pinId}/hide`
 
 ## 6. 不要混淆的概念
 

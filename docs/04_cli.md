@@ -80,11 +80,13 @@ agent-pin markdown --title "PR 审查结果" --file ./review.md
 agent-pin markdown --title "结论" --text "第一版应该做成 Tauri 桌面 Pin。"
 ```
 
+`--file` 和 `--text` 二选一（互斥），必须提供其中一个。
+
 可选参数：
 
 ```bash
 --width 420
---height 360
+--height 360                 # 也接受 "auto"（默认值，按内容自适应高度）
 --no-always-on-top
 --agent codex
 --workspace TryCue
@@ -109,6 +111,8 @@ agent-pin image --title "装修效果图" --path ./render.png --caption "入门�
 
 `--path` 可以是相对路径，CLI 会基于当前工作目录转成绝对路径再 POST（desktop 后端要求绝对路径）。支持的扩展名：PNG/JPG/JPEG/WebP/GIF。文件存在性不校验，前端 `<img>` onerror 显示错误块。
 
+同样支持 `--width` / `--height` / `--no-always-on-top` / `--agent` / `--workspace` / `--task` 可选参数（见 §4）。
+
 ---
 
 ## 6. agent-pin status
@@ -127,6 +131,8 @@ success
 warning
 error
 ```
+
+同样支持 `--width` / `--height` / `--no-always-on-top` / `--agent` / `--workspace` / `--task` 可选参数（见 §4）。
 
 ---
 
@@ -171,8 +177,8 @@ agent-pin list
 示例输出：
 
 ```text
-pin_20260630_121530_pr_review  PR 审查结果  visible
-pin_20260630_122100_cabinet    装修效果图  hidden
+pin_1782801843675_717272  PR 审查结果  visible
+pin_1782801900100_283945  装修效果图  hidden
 ```
 
 ---
@@ -182,7 +188,7 @@ pin_20260630_122100_cabinet    装修效果图  hidden
 重新显示一个已隐藏 Pin。
 
 ```bash
-agent-pin show pin_20260630_122100_cabinet
+agent-pin show pin_1782801900100_283945
 ```
 
 ---
@@ -211,6 +217,14 @@ http://127.0.0.1:4317
 agent-pin --endpoint http://127.0.0.1:4318 health
 AGENT_PIN_ENDPOINT=http://127.0.0.1:4318 agent-pin health
 ```
+
+endpoint 校验规则（防 SSRF）：
+
+- 仅允许 `http` scheme（拒绝 `https`）
+- 仅允许 host 为 `127.0.0.1`、`localhost` 或 `[::1]`（IPv6 回环需加方括号）
+- 拒绝 userinfo（如 `http://user:pass@127.0.0.1`）
+- 拒绝 path、query、fragment（如 `http://127.0.0.1/evil` 或 `http://127.0.0.1?a=b`）
+- 端口号不限（支持多实例调试）
 
 ---
 

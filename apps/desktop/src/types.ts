@@ -32,7 +32,7 @@ export type PinBlock =
 // ---------- PinDocument ----------
 
 export type PinDocument = {
-  version: number;
+  version: 1;
   title: string;
   blocks: PinBlock[];
   window?: PinWindowConfig;

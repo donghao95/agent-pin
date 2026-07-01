@@ -206,7 +206,7 @@ PinDocument 是 API、CLI、窗口渲染之间的核心契约。修改 Pin JSON 
 | `image.path` | 4096 字节 | 防止超长 path 导致持久化膨胀和前端渲染问题 |
 | `image.caption` | 1024 字符 | 图片说明文字上限 |
 | `status.text` | 4096 字符 | 状态块文字上限 |
-| `source.agent` / `source.tool` | 256 字符 | 来源标识上限 |
+| `source.agent` / `source.workspace` / `source.task` / `source.conversationId` | 256 字符 | 来源标识上限 |
 
 **控制字符校验**：所有字符串字段（title、content、path、caption、text、source）不允许包含 C0 控制符（含 NUL 字节），允许 `\n`、`\t`、`\r`。防止 NUL 字节注入底层 C API 导致文件路径截断。
 
