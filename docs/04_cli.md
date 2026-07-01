@@ -85,8 +85,8 @@ agent-pin markdown --title "结论" --text "第一版应该做成 Tauri 桌面 P
 可选参数：
 
 ```bash
---width 420
---height 360                 # 也接受 "auto"（默认值，按内容自适应高度）
+--width 420                   # 可选，范围 280..=100_000（默认 420）
+--height 360                  # 可选，范围 100..=100_000 或 "auto"（默认 auto，按内容自适应高度）
 --no-always-on-top
 --agent codex
 --workspace TryCue

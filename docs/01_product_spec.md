@@ -201,7 +201,8 @@ PinDocument 是 API、CLI、窗口渲染之间的核心契约。修改 Pin JSON 
 | `title` | 1024 字符 | 防止标题过长导致窗口标题栏溢出 |
 | `markdown.content` | 256 KB | 单个 markdown block 内容上限 |
 | `blocks` 数量 | 50 | 单个 Pin 的 block 数量上限 |
-| `window.width` / `window.height`（数字值） | 1..=100_000 | 防止异常大值导致窗口创建失败 |
+| `window.width` | 280..=100_000 | 与窗口 `min_inner_size` 对齐，小于 280 会被 `validate` 拒绝 |
+| `window.height`（数字值） | 100..=100_000 | 与窗口 `min_inner_size` 对齐，小于 100 会被 `validate` 拒绝 |
 | `window.x` / `window.y` | -100_000..=100_000 | 防止极值导致窗口创建 panic |
 | `image.path` | 4096 字节 | 防止超长 path 导致持久化膨胀和前端渲染问题 |
 | `image.caption` | 1024 字符 | 图片说明文字上限 |
@@ -293,6 +294,7 @@ MVP 中 status 是静态展示，不做实时更新。
 约束：
 
 - 最小宽度：280
+- 最小高度：100
 - 默认宽度：420
 - 最大默认高度：屏幕高度的 70%
 

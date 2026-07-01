@@ -136,8 +136,12 @@ pub const MAX_STATUS_TEXT_CHARS: usize = 4096;
 pub const MAX_SOURCE_FIELD_CHARS: usize = 256;
 /// image path 长度上限（字节）。防超长 path 导致持久化膨胀和前端渲染问题。
 pub const MAX_IMAGE_PATH_BYTES: usize = 4096;
-/// 窗口宽度/高度数值下限（防 0 或极小值导致不可见窗口）。
-pub const MIN_WINDOW_DIMENSION: u32 = 1;
+/// 窗口宽度数值下限（与 window.rs 的 min_inner_size 对齐，见 docs/05_ui_style.md §4）。
+/// 小于此值的 width 会被 validate 拒绝，而不是静默放大到最小宽度。
+pub const MIN_WINDOW_WIDTH: u32 = 280;
+/// 窗口高度数值下限（与 window.rs 的 min_inner_size 对齐，保证标题栏可见）。
+/// 小于此值的 height 会被 validate 拒绝。
+pub const MIN_WINDOW_HEIGHT: u32 = 100;
 /// 窗口宽度/高度数值上限（防超出屏幕导致创建失败）。
 pub const MAX_WINDOW_DIMENSION: u32 = 100_000;
 /// 窗口 x/y 坐标范围（防极值导致窗口创建 panic）。
@@ -227,16 +231,18 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
             }
         }
     }
-    // 校验 window 数值范围：width/height(Number) 必须在 [MIN, MAX] 内，
+    // 校验 window 数值范围：
+    // - width 必须在 [MIN_WINDOW_WIDTH, MAX_WINDOW_DIMENSION] 内（与窗口 min_inner_size 对齐，拒绝静默放大）
+    // - height(Number) 必须在 [MIN_WINDOW_HEIGHT, MAX_WINDOW_DIMENSION] 内（保证标题栏可见）
     // 防 0 或极小值导致不可见窗口，防超大值导致创建失败（M11）。
     if let Some(win) = &doc.window {
         if let Some(w) = win.width {
-            if !(MIN_WINDOW_DIMENSION..=MAX_WINDOW_DIMENSION).contains(&w) {
+            if !(MIN_WINDOW_WIDTH..=MAX_WINDOW_DIMENSION).contains(&w) {
                 return Err(PinError::new(
                     PinErrorCode::InvalidPinDocument,
                     format!(
                         "window.width must be in [{}..{}], got {}",
-                        MIN_WINDOW_DIMENSION, MAX_WINDOW_DIMENSION, w
+                        MIN_WINDOW_WIDTH, MAX_WINDOW_DIMENSION, w
                     ),
                 ));
             }
@@ -264,12 +270,12 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
             }
         }
         if let Some(PinHeight::Number(n)) = &win.height {
-            if !(MIN_WINDOW_DIMENSION..=MAX_WINDOW_DIMENSION).contains(n) {
+            if !(MIN_WINDOW_HEIGHT..=MAX_WINDOW_DIMENSION).contains(n) {
                 return Err(PinError::new(
                     PinErrorCode::InvalidPinDocument,
                     format!(
                         "window.height must be in [{}..{}], got {}",
-                        MIN_WINDOW_DIMENSION, MAX_WINDOW_DIMENSION, n
+                        MIN_WINDOW_HEIGHT, MAX_WINDOW_DIMENSION, n
                     ),
                 ));
             }
@@ -569,6 +575,62 @@ mod tests {
             always_on_top: None,
         });
         assert!(validate(&doc).is_err());
+    }
+
+    // ---------- window width/height 最小值边界测试 ----------
+    // validate 的最小值与 window.rs 的 min_inner_size 对齐（280/100），
+    // 小于此值的请求会被拒绝而非静默放大（避免 Agent 困惑）。
+
+    #[test]
+    fn test_window_width_below_minimum_rejected() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: Some(MIN_WINDOW_WIDTH - 1),
+            height: None,
+            x: None,
+            y: None,
+            always_on_top: None,
+        });
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_window_width_at_minimum_accepted() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: Some(MIN_WINDOW_WIDTH),
+            height: None,
+            x: None,
+            y: None,
+            always_on_top: None,
+        });
+        assert!(validate(&doc).is_ok());
+    }
+
+    #[test]
+    fn test_window_height_below_minimum_rejected() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: None,
+            height: Some(PinHeight::Number(MIN_WINDOW_HEIGHT - 1)),
+            x: None,
+            y: None,
+            always_on_top: None,
+        });
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_window_height_at_minimum_accepted() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: None,
+            height: Some(PinHeight::Number(MIN_WINDOW_HEIGHT)),
+            x: None,
+            y: None,
+            always_on_top: None,
+        });
+        assert!(validate(&doc).is_ok());
     }
 
     #[test]
