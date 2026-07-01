@@ -3,6 +3,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { PinDocument, StatusLevel } from "./types";
 
 // 标题栏拖动：Tauri 2 在 Windows 上 data-tauri-drag-region 属性不可靠，
 // 改用 onMouseDown + startDragging() 手动触发，最稳定。
@@ -19,39 +20,6 @@ const handleTitlebarMouseDown = (e: React.MouseEvent) => {
       console.error("[agent-pin] startDragging failed:", err);
     });
 };
-
-// PinDocument 类型，与后端 packages/shared/src/lib.rs 对齐（M9：补全 window/source/createdAt）
-type PinWindowConfig = {
-  width?: number;
-  // 后端 PinHeight 是 untagged enum：number | "auto"，前端类型需与之对齐（m-A4）
-  height?: number | string;
-  x?: number;
-  y?: number;
-  alwaysOnTop?: boolean;
-};
-
-type PinSource = {
-  agent?: string;
-  workspace?: string;
-  task?: string;
-  conversationId?: string;
-};
-
-type PinDocument = {
-  version: number;
-  title: string;
-  blocks: Array<
-    | { type: "markdown"; content: string }
-    | { type: "image"; path: string; caption?: string }
-    | { type: "status"; level?: string; text: string }
-  >;
-  window?: PinWindowConfig;
-  source?: PinSource;
-  createdAt?: string;
-};
-
-// status block 的 level 类型
-type StatusLevel = "info" | "success" | "warning" | "error";
 
 // 类型守卫：后端已校验 level，但防御性白名单校验避免持久化数据被篡改时注入任意 className。
 // 同时让 TS 收窄 string → StatusLevel，避免后续 statusIcon(level) 类型错误。
@@ -70,18 +38,27 @@ export default function Pin() {
       setError("missing pinId in URL");
       return;
     }
+    // m12：用 ref 标志位防止窗口快速关闭后 setState 无效
+    let cancelled = false;
     const timer = window.setTimeout(() => {
       invoke<PinDocument | null>("get_pin_document", { pinId })
         .then((d) => {
+          if (cancelled) return;
           if (!d) {
             setError("pin document not found: " + pinId);
           } else {
             setDoc(d);
           }
         })
-        .catch((e) => setError(String(e)));
+        .catch((e) => {
+          if (cancelled) return;
+          setError(String(e));
+        });
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   const handleClose = () => {
@@ -100,6 +77,7 @@ export default function Pin() {
             className="pin-close"
             onClick={handleClose}
             title="关闭"
+            aria-label="关闭"
           >
             ×
           </button>
@@ -121,6 +99,7 @@ export default function Pin() {
             className="pin-close"
             onClick={handleClose}
             title="关闭"
+            aria-label="关闭"
           >
             ×
           </button>
@@ -139,6 +118,7 @@ export default function Pin() {
           className="pin-close"
           onClick={handleClose}
           title="关闭"
+          aria-label="关闭"
         >
           ×
         </button>
@@ -148,7 +128,15 @@ export default function Pin() {
           if (block.type === "markdown") {
             return (
               <div className="pin-block pin-markdown" key={i}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    // 外链在新窗口打开，避免 webview 内导航后无法返回（m12）
+                    a: ({ node: _node, ...props }) => (
+                      <a {...props} target="_blank" rel="noopener noreferrer" />
+                    ),
+                  }}
+                >
                   {block.content}
                 </ReactMarkdown>
               </div>

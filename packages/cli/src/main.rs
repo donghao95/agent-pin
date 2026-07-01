@@ -23,8 +23,8 @@ mod client;
 use std::path::Path;
 
 use agent_pin_shared::{
-    ImageBlock, MarkdownBlock, PinBlock, PinDocument, PinHeight, PinSource, PinWindowConfig,
-    StatusBlock,
+    validate, ImageBlock, MarkdownBlock, PinBlock, PinDocument, PinHeight, PinSource,
+    PinWindowConfig, StatusBlock,
 };
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -163,11 +163,18 @@ fn main() {
         }
     };
 
+    // health 命令的"未运行"是用户可见状态，输出到 stdout；
+    // 其他命令的"未运行"是程序错误，输出到 stderr。
+    let is_health = matches!(cli.command, Commands::Health);
     if let Err(e) = run_command(&client, cli.command) {
-        // 连接失败的错误统一格式化为友好提示（输出到 stdout，因为这是用户可见状态而非程序错误）
         if e.starts_with("__NOT_RUNNING__") {
-            println!("Agent Pin is not running.");
-            println!("Please start the desktop app first.");
+            if is_health {
+                println!("Agent Pin is not running.");
+                println!("Please start the desktop app first.");
+            } else {
+                eprintln!("Agent Pin is not running.");
+                eprintln!("Please start the desktop app first.");
+            }
         } else {
             eprintln!("Error: {}", e);
         }
@@ -267,8 +274,8 @@ fn cmd_push(client: &Client, args: PushArgs) -> Result<(), String> {
     let content = read_file(&args.file)?;
     // 解析为 Value，转换 image block 的相对路径为绝对路径，再序列化 POST。
     // 不强制完整类型校验：desktop 后端会校验，CLI 只负责路径转换。
-    let mut doc: Value = serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse pin JSON: {}", e))?;
+    let mut doc: Value =
+        serde_json::from_str(&content).map_err(|e| format!("failed to parse pin JSON: {}", e))?;
 
     if let Some(blocks) = doc.get_mut("blocks").and_then(|b| b.as_array_mut()) {
         for block in blocks.iter_mut() {
@@ -281,8 +288,8 @@ fn cmd_push(client: &Client, args: PushArgs) -> Result<(), String> {
         }
     }
 
-    let body = serde_json::to_string(&doc)
-        .map_err(|e| format!("failed to serialize pin JSON: {}", e))?;
+    let body =
+        serde_json::to_string(&doc).map_err(|e| format!("failed to serialize pin JSON: {}", e))?;
     create_pin_raw(client, &body)
 }
 
@@ -308,7 +315,10 @@ fn cmd_list(client: &Client) -> Result<(), String> {
 
     for pin in pins {
         let pin_id = pin.get("pinId").and_then(|v| v.as_str()).unwrap_or("?");
-        let title = pin.get("title").and_then(|v| v.as_str()).unwrap_or("(no title)");
+        let title = pin
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no title)");
         let state = pin.get("state").and_then(|v| v.as_str()).unwrap_or("?");
         println!("{:<width$}  {}  {}", pin_id, title, state, width = max_id);
     }
@@ -338,24 +348,32 @@ fn cmd_hide_all(client: &Client) -> Result<(), String> {
 
 // ---------- 辅助函数 ----------
 
-/// 校验 pin_id 格式（M5：防 URL 路径截断）。
+/// 校验 pin_id 格式（M5：防 URL 路径截断；M14：改白名单）。
 /// pin_id 由后端 generate_pin_id 生成，格式为 pin_<timestamp>_<6位随机>。
-/// 拒绝空字符串、包含路径分隔符或特殊字符的输入，避免 #、?、.. 破坏路由。
-/// 同时拒绝 NUL 字节，避免截断风险。
+/// 白名单：只允许字母数字、下划线、连字符，避免 #、?、/、.. 等破坏路由。
 fn validate_pin_id(pin_id: &str) -> Result<(), String> {
     if pin_id.is_empty() {
         return Err("pin_id must be non-empty".to_string());
     }
-    if pin_id.contains('/') || pin_id.contains('\\') || pin_id.contains("..")
-        || pin_id.contains('#') || pin_id.contains('?') || pin_id.contains('\0')
+    // 白名单：只允许字母数字、下划线、连字符（pin_ 前缀格式 + 未来扩展）
+    if !pin_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(format!("invalid pin_id: {}", pin_id));
+        return Err(format!(
+            "invalid pin_id (only alphanumeric, underscore, hyphen allowed): {}",
+            pin_id
+        ));
     }
     Ok(())
 }
 
 /// 组装 PinDocument 并 POST /api/pins。
 fn create_pin(client: &Client, doc: &PinDocument) -> Result<(), String> {
+    // 提前校验，避免 HTTP 往返后才报错（复用 shared 校验逻辑，不复制业务规则）
+    if let Err(e) = validate(doc) {
+        return Err(format!("invalid pin document: {}", e.message));
+    }
     let body = serde_json::to_string(doc)
         .map_err(|e| format!("failed to serialize pin document: {}", e))?;
     create_pin_raw(client, &body)
@@ -364,10 +382,13 @@ fn create_pin(client: &Client, doc: &PinDocument) -> Result<(), String> {
 /// 直接 POST 原始 JSON body（push 命令用）。
 fn create_pin_raw(client: &Client, body: &str) -> Result<(), String> {
     let resp = client.post("/api/pins", body)?;
+    // 防御性校验：HTTP 2xx 但 body ok!=true 视为错误（与 cmd_show/cmd_hide_all 对齐）
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!("unexpected response: {}", resp));
+    }
     if let Some(pin_id) = resp.get("pinId").and_then(|v| v.as_str()) {
         println!("Pin created: {}", pin_id);
     } else {
-        // 响应没有 pinId 字段，但 HTTP 成功，打印整个响应
         println!("Pin created.");
     }
     Ok(())
@@ -433,9 +454,23 @@ fn build_source(common: &CommonArgs) -> Option<PinSource> {
     })
 }
 
+/// 文件大小上限：2MB（略大于 HTTP 1MB body 限制，留余量给 JSON 包装）
+const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
 /// 读取文件内容，失败返回友好错误。
+/// 读取前先 metadata 检查大小，超过 MAX_FILE_BYTES 报错（防 OOM）。
 /// 剥离 UTF-8 BOM（Windows PowerShell 默认带 BOM，会导致 JSON 解析失败）。
 fn read_file(path: &str) -> Result<String, String> {
+    let metadata =
+        std::fs::metadata(path).map_err(|e| format!("failed to read file '{}': {}", path, e))?;
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "file '{}' too large ({} bytes, max {} bytes)",
+            path,
+            metadata.len(),
+            MAX_FILE_BYTES
+        ));
+    }
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read file '{}': {}", path, e))?;
     Ok(content.trim_start_matches('\u{feff}').to_string())
@@ -449,8 +484,8 @@ fn to_absolute(path: &str) -> Result<String, String> {
     if p.is_absolute() {
         return Ok(path.to_string());
     }
-    let cwd = std::env::current_dir()
-        .map_err(|e| format!("failed to get current directory: {}", e))?;
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
     let joined = cwd.join(p);
     // Windows 上保留反斜杠分隔符，desktop 端 Path::is_absolute 能识别。
     // 不做分隔符标准化，保持路径原始形态。
@@ -459,4 +494,3 @@ fn to_absolute(path: &str) -> Result<String, String> {
         .ok_or_else(|| format!("path contains invalid UTF-8: {}", path))?;
     Ok(s.to_string())
 }
-

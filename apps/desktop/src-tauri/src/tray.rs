@@ -12,6 +12,8 @@
 //
 // 契约来源：docs/phase-plan.md Phase 2-B、docs/mvp-spec.md §13
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -21,7 +23,6 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::pin_actions::ShowPinMode;
 use crate::registry;
-use crate::storage::PinState;
 use crate::updater;
 
 /// 托盘 id（用于 tray_by_id 获取后刷新菜单）
@@ -32,6 +33,10 @@ const RECENT_LIMIT: usize = 5;
 const TITLE_MAX_CHARS: usize = 30;
 /// 托盘"检查更新"菜单项 id
 const MENU_CHECK_UPDATE: &str = "check_update";
+
+/// M11 修复：防止"检查更新"并发触发。
+/// 用户连续点击时，第二次及以后的点击直接忽略，避免重复网络请求和重复弹窗。
+static UPDATE_CHECK_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// 构建系统托盘。在 Tauri setup hook中调用。
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
@@ -162,7 +167,15 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             }
         }
         "hide_all" => {
-            hide_all_visible(app);
+            // M10 修复：复用 pin_actions::hide_all_visible，消除三份拷贝
+            let failed = crate::pin_actions::hide_all_visible(app);
+            if !failed.is_empty() {
+                eprintln!(
+                    "[agent-pin] tray hide_all failed for {} pin(s): {}",
+                    failed.len(),
+                    failed.join(", ")
+                );
+            }
             refresh(app);
         }
         MENU_CHECK_UPDATE => {
@@ -181,22 +194,6 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
-/// 隐藏所有 visible Pin（托盘"隐藏全部"用）。
-fn hide_all_visible(app: &AppHandle) {
-    let metas = registry::REGISTRY.list();
-    for meta in metas {
-        if meta.state != PinState::Visible {
-            continue;
-        }
-        if let Err(e) = crate::window::hide_pin_window(app, &meta.pin_id) {
-            eprintln!("[agent-pin] tray hide_all window {}: {}", meta.pin_id, e);
-        }
-        if let Err(e) = registry::REGISTRY.set_state(&meta.pin_id, PinState::Hidden) {
-            eprintln!("[agent-pin] tray hide_all state {}: {}", meta.pin_id, e);
-        }
-    }
-}
-
 /// 打开管理界面窗口（已存在则 show + 聚焦，不重建）。
 /// pub 供 lib.rs setup 启动时调用。
 /// 已存在时调 show()：窗口可能被用户点关闭按钮 hide 了（CloseRequested 拦截）。
@@ -211,19 +208,15 @@ pub fn open_manager_window(app: &AppHandle) -> tauri::Result<()> {
         }
         return Ok(());
     }
-    WebviewWindowBuilder::new(
-        app,
-        LABEL,
-        WebviewUrl::App("index.html?manager=1".into()),
-    )
-    .title("Agent Pin 管理")
-    .inner_size(880.0, 620.0)
-    .min_inner_size(640.0, 400.0)
-    // 管理界面用系统装饰（不是 Pin 窗口，不需要自定义标题栏）
-    .decorations(true)
-    .resizable(true)
-    .visible(true)
-    .build()?;
+    WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html?manager=1".into()))
+        .title("Agent Pin 管理")
+        .inner_size(880.0, 620.0)
+        .min_inner_size(640.0, 400.0)
+        // 管理界面用系统装饰（不是 Pin 窗口，不需要自定义标题栏）
+        .decorations(true)
+        .resizable(true)
+        .visible(true)
+        .build()?;
     Ok(())
 }
 
@@ -248,10 +241,23 @@ fn build_update_label() -> String {
 
 /// 处理"检查更新"菜单点击。
 /// spawn_blocking 调 updater::check(true)，根据结果弹 dialog 或打开浏览器。
+/// M11 修复：用 AtomicBool 防止并发触发（连续点击只执行第一次，后续忽略）。
 fn handle_check_update(app: &AppHandle) {
+    // CAS 去重：若已有检查在进行中，直接返回
+    if UPDATE_CHECK_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        eprintln!("[agent-pin] check_update already in progress, ignoring");
+        return;
+    }
+
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
+        // 确保无论结果如何都重置标志位
         let result = tauri::async_runtime::spawn_blocking(|| updater::check(true)).await;
+        UPDATE_CHECK_IN_PROGRESS.store(false, Ordering::SeqCst);
+
         match result {
             Ok(Ok(check)) => {
                 if check.has_update {

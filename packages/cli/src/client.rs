@@ -35,6 +35,7 @@ impl Client {
             endpoint,
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(10))
+                .redirects(0) // M6：禁止重定向，防 SSRF 数据外泄
                 .build(),
         })
     }
@@ -47,8 +48,17 @@ impl Client {
             Ok(resp) => resp
                 .into_json::<Value>()
                 .map_err(|e| format!("failed to parse response: {}", e)),
-            Err(ureq::Error::Status(code, resp)) => Err(parse_error_response(code, resp)),
-            Err(e) => Err(not_running_error(&e)),
+            Err(ureq::Error::Status(code, resp)) => {
+                // 3xx 重定向视为错误（我们禁止重定向，但防御性处理）
+                if (300..400).contains(&code) {
+                    return Err(format!(
+                        "server returned redirect ({}), which is blocked for security",
+                        code
+                    ));
+                }
+                Err(parse_error_response(code, resp))
+            }
+            Err(e) => Err(classify_transport_error(&e)),
         }
     }
 
@@ -64,8 +74,16 @@ impl Client {
             Ok(resp) => resp
                 .into_json::<Value>()
                 .map_err(|e| format!("failed to parse response: {}", e)),
-            Err(ureq::Error::Status(code, resp)) => Err(parse_error_response(code, resp)),
-            Err(e) => Err(not_running_error(&e)),
+            Err(ureq::Error::Status(code, resp)) => {
+                if (300..400).contains(&code) {
+                    return Err(format!(
+                        "server returned redirect ({}), which is blocked for security",
+                        code
+                    ));
+                }
+                Err(parse_error_response(code, resp))
+            }
+            Err(e) => Err(classify_transport_error(&e)),
         }
     }
 
@@ -77,49 +95,76 @@ impl Client {
 
 /// 从 HTTP 错误响应体解析错误消息。
 /// 错误响应格式：{"ok":false,"error":{"code":"...","message":"..."}}
+/// 非 JSON 响应或缺 error.message 时保留原始内容（截断到 500 字节避免过长）。
 fn parse_error_response(code: u16, resp: ureq::Response) -> String {
-    let body: Value = resp.into_json().unwrap_or_else(|_| json!({}));
+    let raw = resp.into_string().unwrap_or_default();
+    let body: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
     let error_msg = body
         .get("error")
         .and_then(|e| e.get("message"))
         .and_then(|m| m.as_str())
-        .unwrap_or("unknown error");
+        .unwrap_or("");
     let error_code = body
         .get("error")
         .and_then(|e| e.get("code"))
         .and_then(|c| c.as_str())
         .unwrap_or("UNKNOWN");
-    format!("[{}] {} (HTTP {})", error_code, error_msg, code)
+    if error_msg.is_empty() {
+        // 非 JSON 响应或缺少 error.message，展示原始内容（按 char 边界截断到 500 字节，避免 panic）
+        let truncated = if raw.len() > 500 {
+            let mut end = 500;
+            while !raw.is_char_boundary(end) {
+                end -= 1;
+            }
+            &raw[..end]
+        } else {
+            &raw
+        };
+        format!("[{}] (HTTP {} raw: {})", error_code, code, truncated)
+    } else {
+        format!("[{}] {} (HTTP {})", error_code, error_msg, code)
+    }
 }
 
-/// 连接失败时的统一错误消息。
-/// health 命令依赖此消息格式判断是否输出 "not running" 提示。
-fn not_running_error(e: &ureq::Error) -> String {
-    format!("__NOT_RUNNING__: {}", e)
+/// 分类传输层错误，区分"未运行"和"其他网络错误"。
+/// health 命令依赖 `__NOT_RUNNING__` 前缀判断是否输出 "not running" 提示。
+/// 连接失败视为"未运行"；超时/DNS 等其他错误不误导用户。
+fn classify_transport_error(e: &ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(_, _) => unreachable!("Status errors handled separately"),
+        ureq::Error::Transport(t) => match t.kind() {
+            ureq::ErrorKind::ConnectionFailed => {
+                format!("__NOT_RUNNING__: {}", e)
+            }
+            _ => {
+                // 超时、DNS、TLS 等其他网络错误，不标记为"未运行"
+                format!("network error: {} ({:?})", e, t.kind())
+            }
+        },
+    }
 }
 
 /// 校验 endpoint host 必须是本地回环地址（C2 SSRF 防护）。
 /// 用 url::Url::parse 解析，正确处理 URL 规范：
 /// - 拒绝 userinfo（防 http://127.0.0.1@evil.com → host=evil.com 绕过）
+/// - 只允许 http scheme（本地只监听 http，https 语义不一致）
+/// - 拒绝 path/query/fragment（endpoint 应只含 scheme://host:port）
 /// - 大小写不敏感匹配 host（m11：LOCALHOST 也可接受）
+///
 /// 允许：127.0.0.1 / localhost / ::1（IPv6）
 /// 拒绝：其他任何 host，避免 Pin 内容泄露到远程主机。
 fn validate_endpoint(endpoint: &str) -> Result<(), String> {
-    let url = url::Url::parse(endpoint)
-        .map_err(|e| format!("invalid endpoint URL: {}", e))?;
+    let url = url::Url::parse(endpoint).map_err(|e| format!("invalid endpoint URL: {}", e))?;
 
     // 拒绝 userinfo（防 SSRF：http://127.0.0.1@evil.com 被 CLI 误判为 host=127.0.0.1）
     if !url.username().is_empty() {
-        return Err(format!(
-            "endpoint must not contain userinfo: {}",
-            endpoint
-        ));
+        return Err(format!("endpoint must not contain userinfo: {}", endpoint));
     }
 
-    // 校验 scheme
+    // 校验 scheme：只允许 http（本地只监听 http，https 语义不一致）
     match url.scheme() {
-        "http" | "https" => {}
-        s => return Err(format!("endpoint scheme must be http or https: {}", s)),
+        "http" => {}
+        s => return Err(format!("endpoint scheme must be http (local only): {}", s)),
     }
 
     // 校验 host 必须是本地回环
@@ -128,10 +173,25 @@ fn validate_endpoint(endpoint: &str) -> Result<(), String> {
         .ok_or_else(|| format!("endpoint must have a host: {}", endpoint))?;
 
     match host.to_lowercase().as_str() {
-        "127.0.0.1" | "localhost" | "::1" => Ok(()),
-        _ => Err(format!(
-            "endpoint host '{}' is not allowed: only 127.0.0.1, localhost, ::1 are permitted (local-only)",
-            host
-        )),
+        "127.0.0.1" | "localhost" | "::1" => {}
+        _ => {
+            return Err(format!(
+                "endpoint host '{}' is not allowed: only 127.0.0.1, localhost, ::1 are permitted (local-only)",
+                host
+            ))
+        }
     }
+
+    // 拒绝 path/query/fragment（endpoint 应该只有 scheme://host:port）
+    if !url.path().is_empty() && url.path() != "/" {
+        return Err(format!("endpoint must not contain path: {}", endpoint));
+    }
+    if url.query().is_some() {
+        return Err(format!("endpoint must not contain query: {}", endpoint));
+    }
+    if url.fragment().is_some() {
+        return Err(format!("endpoint must not contain fragment: {}", endpoint));
+    }
+
+    Ok(())
 }

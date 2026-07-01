@@ -202,6 +202,15 @@ PinDocument 是 API、CLI、窗口渲染之间的核心契约。修改 Pin JSON 
 | `markdown.content` | 256 KB | 单个 markdown block 内容上限 |
 | `blocks` 数量 | 50 | 单个 Pin 的 block 数量上限 |
 | `window.width` / `window.height`（数字值） | 1..=100_000 | 防止异常大值导致窗口创建失败 |
+| `window.x` / `window.y` | -100_000..=100_000 | 防止极值导致窗口创建 panic |
+| `image.path` | 4096 字节 | 防止超长 path 导致持久化膨胀和前端渲染问题 |
+| `image.caption` | 1024 字符 | 图片说明文字上限 |
+| `status.text` | 4096 字符 | 状态块文字上限 |
+| `source.agent` / `source.tool` | 256 字符 | 来源标识上限 |
+
+**控制字符校验**：所有字符串字段（title、content、path、caption、text、source）不允许包含 C0 控制符（含 NUL 字节），允许 `\n`、`\t`、`\r`。防止 NUL 字节注入底层 C API 导致文件路径截断。
+
+**Pin 总数上限**：registry 中 Pin 总数上限为 500。超过时 `POST /api/pins` 返回 409。防止本地恶意进程循环创建海量 Pin 导致资源耗尽。
 
 HTTP 请求体总大小上限为 1 MB（`03_api.md` §4）。
 

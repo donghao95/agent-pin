@@ -96,7 +96,7 @@ pub fn check(force: bool) -> Result<UpdateCheckResult, String> {
         if let Some(cache) = read_cache() {
             if is_cache_fresh(&cache) {
                 let latest_norm = strip_v(&cache.latest_version);
-                let has_update = compare_version(&current_norm, &latest_norm).is_lt();
+                let has_update = compare_version(current_norm, latest_norm).is_lt();
                 return Ok(UpdateCheckResult {
                     has_update,
                     current_version: current_norm.to_string(),
@@ -119,7 +119,7 @@ pub fn check(force: bool) -> Result<UpdateCheckResult, String> {
         eprintln!("[agent-pin] updater write_cache: {}", e);
     }
 
-    let has_update = compare_version(&current_norm, &latest_norm).is_lt();
+    let has_update = compare_version(current_norm, &latest_norm).is_lt();
     Ok(UpdateCheckResult {
         has_update,
         current_version: current_norm.to_string(),
@@ -162,30 +162,35 @@ fn fetch_latest_release() -> Result<GithubRelease, String> {
 
 /// 读缓存文件。文件不存在或解析失败返回 None（不阻塞）。
 fn read_cache() -> Option<UpdateCache> {
-    let path = cache_path()?;
+    let path = cache_path();
     let content = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
 /// 写缓存文件。失败返回 Err（调用方 eprintln）。
+/// m14：与 storage.rs 一致，使用 write + fsync + rename 原子写。
 fn write_cache(latest_version: &str) -> Result<(), String> {
-    let path = cache_path().ok_or_else(|| "cache path unavailable".to_string())?;
+    let path = cache_path();
     let cache = UpdateCache {
         last_checked_at: now_rfc3339(),
         latest_version: latest_version.to_string(),
     };
     let json = serde_json::to_string_pretty(&cache).map_err(|e| e.to_string())?;
-    // 原子写：先 .tmp 再 rename（与 storage.rs 一致）
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    f.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    drop(f);
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 /// 缓存文件路径：~/.agent-pin/update-cache.json
 /// 与 storage.rs 的 data_dir 一致。
-fn cache_path() -> Option<std::path::PathBuf> {
-    let dir = storage::data_dir();
-    Some(std::path::PathBuf::from(dir).join("update-cache.json"))
+/// M13 修复：data_dir() 总是返回 PathBuf（None 场景已 fallback 到 "."），
+/// 因此这里直接返回 PathBuf，不再用 Option 包装假 None 语义。
+fn cache_path() -> std::path::PathBuf {
+    storage::data_dir().join("update-cache.json")
 }
 
 /// 判断缓存是否在有效期内（24h）。
@@ -208,12 +213,19 @@ fn strip_v(s: &str) -> &str {
     s.strip_prefix('v').unwrap_or(s)
 }
 
-/// 简单版本对比：解析 "X.Y.Z" 为 (major, minor, patch, is_release) 比较。
+/// 简单版本对比：解析 "X.Y.Z" 为 (major, minor, patch, is_release, pre_release_ids) 比较。
 ///
-/// 不引入 semver crate（会拉一堆依赖），手写 10 行够用。
-/// 语义：主版本号按元组比较；主版本号相等时，正式版（无后缀） > 预发布版（有 -suffix）。
-///   例如 0.1.0-beta.1 < 0.1.0 < 0.1.1
-/// 元组比较：is_release=true（正式版）排在 is_release=false（预发布）之后。
+/// 不引入 semver crate（会拉一堆依赖），手写够用。
+/// 语义遵循 SemVer 11 节：
+/// - 主版本号按元组比较
+/// - 正式版（无后缀） > 预发布版（有 -suffix）
+/// - 同为预发布时，逐个比较后缀标识符：
+///   - 纯数字标识符按数值比较
+///   - 非纯数字标识符按 ASCII 字典序比较
+///   - 纯数字 < 非纯数字
+///   - 标识符少的 < 标识符多的（前缀相同时）
+///
+///   例如 0.1.0-beta.1 < 0.1.0-beta.2 < 0.1.0-rc.1 < 0.1.0 < 0.1.1
 #[derive(Debug, PartialEq, Eq)]
 enum VersionCmp {
     Lt,
@@ -237,20 +249,59 @@ fn compare_version(a: &str, b: &str) -> VersionCmp {
     }
 }
 
-/// 解析 "X.Y.Z" 或 "X.Y.Z-suffix" 为 (major, minor, patch, is_release)。
-/// is_release=true 表示正式版（无 -suffix），false 表示预发布版。
+/// 预发布标识符：纯数字或字符串。
+/// Ord 实现 SemVer 语义：纯数字 < 非纯数字；纯数字按数值比；非纯数字按 ASCII 字典序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreId {
+    Num(u64),
+    Str(String),
+}
+
+impl Ord for PreId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use PreId::*;
+        match (self, other) {
+            (Num(a), Num(b)) => a.cmp(b),
+            (Num(_), Str(_)) => std::cmp::Ordering::Less,
+            (Str(_), Num(_)) => std::cmp::Ordering::Greater,
+            (Str(a), Str(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for PreId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// 解析 "X.Y.Z" 或 "X.Y.Z-suffix" 为可比较的元组。
+/// 返回 (major, minor, patch, is_release, pre_release_ids)。
+/// is_release=true 表示正式版（pre_release_ids 为空）。
 /// 解析失败的部分当 0。
-fn parse_version(s: &str) -> (u32, u32, u32, bool) {
+fn parse_version(s: &str) -> (u32, u32, u32, bool, Vec<PreId>) {
     // 分离预发布后缀：无 "-" 即正式版
-    let (main, is_release) = match s.split_once('-') {
-        Some((m, _)) => (m, false),
-        None => (s, true),
+    let (main, is_release, pre_ids) = match s.split_once('-') {
+        Some((m, suffix)) => {
+            let ids: Vec<PreId> = suffix
+                .split('.')
+                .map(|part| {
+                    if let Ok(n) = part.parse::<u64>() {
+                        PreId::Num(n)
+                    } else {
+                        PreId::Str(part.to_string())
+                    }
+                })
+                .collect();
+            (m, false, ids)
+        }
+        None => (s, true, Vec::new()),
     };
     let mut parts = main.split('.');
     let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
     let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    (major, minor, patch, is_release)
+    (major, minor, patch, is_release, pre_ids)
 }
 
 // ---------- 测试 ----------
@@ -267,13 +318,23 @@ mod tests {
 
     #[test]
     fn test_parse_version() {
-        assert_eq!(parse_version("0.1.0"), (0, 1, 0, true));
-        assert_eq!(parse_version("1.2.3"), (1, 2, 3, true));
+        // 正式版
+        assert_eq!(parse_version("0.1.0"), (0, 1, 0, true, vec![]));
+        assert_eq!(parse_version("1.2.3"), (1, 2, 3, true, vec![]));
         // 预发布后缀被识别
-        assert_eq!(parse_version("0.1.0-beta.1"), (0, 1, 0, false));
+        assert_eq!(
+            parse_version("0.1.0-beta.1"),
+            (
+                0,
+                1,
+                0,
+                false,
+                vec![PreId::Str("beta".into()), PreId::Num(1)]
+            )
+        );
         // 解析失败部分当 0
-        assert_eq!(parse_version("0.1"), (0, 1, 0, true));
-        assert_eq!(parse_version("0"), (0, 0, 0, true));
+        assert_eq!(parse_version("0.1"), (0, 1, 0, true, vec![]));
+        assert_eq!(parse_version("0"), (0, 0, 0, true, vec![]));
     }
 
     #[test]
@@ -290,6 +351,30 @@ mod tests {
         assert_eq!(
             compare_version("0.1.0-beta.1", "0.1.0-beta.1"),
             VersionCmp::Eq
+        );
+        // M12 修复：不同预发布编号应能区分
+        assert_eq!(
+            compare_version("0.1.0-beta.1", "0.1.0-beta.2"),
+            VersionCmp::Lt
+        );
+        assert_eq!(
+            compare_version("0.1.0-beta.2", "0.1.0-beta.1"),
+            VersionCmp::Gt
+        );
+        // 数字比较正确：beta.10 > beta.2（不是字典序）
+        assert_eq!(
+            compare_version("0.1.0-beta.10", "0.1.0-beta.2"),
+            VersionCmp::Gt
+        );
+        // 不同后缀类型：rc > beta
+        assert_eq!(
+            compare_version("0.1.0-beta.1", "0.1.0-rc.1"),
+            VersionCmp::Lt
+        );
+        // 标识符少的 < 标识符多的（前缀相同时）
+        assert_eq!(
+            compare_version("0.1.0-beta", "0.1.0-beta.1"),
+            VersionCmp::Lt
         );
     }
 }

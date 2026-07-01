@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Agent Pin 默认能力。覆盖两类窗口：动态 label 的 Pin 窗口（pin_*）和固定 label 的管理界面窗口（manager）。用通配符 * 是因为 Pin 窗口 label 在运行时动态生成，无法预先枚举。当前权限范围有限（仅窗口基本操作 + 拖动 + 关闭 + webview 默认），manager 窗口继承这些权限无副作用：系统装饰窗口的关闭/最大化走 OS 路径不依赖 capability；前端 invoke 自定义命令默认允许，无需额外权限。asset protocol 访问本地图片由 tauri.conf.json 的 assetProtocol.scope 控制。未来若引入受限窗口（如设置窗口需访问文件系统），应拆分独立 capability 按 label 匹配。",
+  "description": "Agent Pin 默认能力。覆盖两类窗口：动态 label 的 Pin 窗口（pin_*）和固定 label 的管理界面窗口（manager）。用通配符 * 是因为 Pin 窗口 label 在运行时动态生成，无法预先枚举。当前权限范围有限（仅窗口基本操作 + 拖动 + 关闭 + webview 默认），manager 窗口继承这些权限无副作用：系统装饰窗口的关闭/最大化走 OS 路径不依赖 capability；前端 invoke 自定义命令默认允许，无需额外权限。asset protocol 访问本地图片由 tauri.conf.json 的 assetProtocol.scope 控制。未来若引入受限窗口（如设置窗口需访问文件系统），应拆分独立 capability 按 label 匹配。assetProtocol.scope 为 ['**'] 允许 webview 通过 asset:// 读取任意本地文件。这是当前架构的已知风险(image block 需加载 Agent 指定的任意路径图片)。安全缓解:(1) CSP img-src 限制为 asset+data,JS 无法读取响应体;(2) react-markdown 默认不渲染 raw HTML,禁止引入 rehype-raw;(3) 后端 validate() 校验图片扩展名白名单。未来改进:改由后端读取图片返回 data URI,弃用 asset protocol。",
   "windows": ["*"],
   "permissions": [
     "core:window:default",

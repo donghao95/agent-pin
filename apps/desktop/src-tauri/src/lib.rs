@@ -32,16 +32,27 @@ use crate::storage::{PinMeta, PinState};
 
 /// 前端渲染入口：按 pinId 读取 PinDocument。
 /// 窗口 URL 只带 pinId，数据走这条命令，避免把完整 JSON 塞进 URL。
+/// m5：Pin 窗口（label 以 pin_ 开头）只能读取自身的 PinDocument，
+/// 防止被 XSS 后读取其他 Pin 的内容。manager 窗口不受限。
 #[tauri::command]
-fn get_pin_document(pin_id: String) -> Option<serde_json::Value> {
+fn get_pin_document(window: tauri::WebviewWindow, pin_id: String) -> Option<serde_json::Value> {
+    let label = window.label();
+    if label.starts_with("pin_") && label != pin_id {
+        return None;
+    }
     registry::REGISTRY
         .get(&pin_id)
         .and_then(|doc| serde_json::to_value(doc).ok())
 }
 
 /// 管理界面：列出所有 Pin 元数据（按 createdAt 降序）。
+/// m5：Pin 窗口（label 以 pin_ 开头，渲染不可信 Agent 内容）不应能枚举所有 Pin。
+/// 仅 manager 窗口可调用，防止 Pin 窗口被 XSS 后泄露全部 Pin 元数据。
 #[tauri::command]
-fn list_pins() -> Vec<PinMeta> {
+fn list_pins(window: tauri::WebviewWindow) -> Vec<PinMeta> {
+    if window.label() != "manager" {
+        return Vec::new();
+    }
     registry::REGISTRY.list()
 }
 
@@ -51,7 +62,7 @@ fn list_pins() -> Vec<PinMeta> {
 /// 会出现管理页卡住、新窗口空白的 IPC 重入问题。这里先返回，再异步创建窗口。
 #[tauri::command]
 fn show_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
-    pin_actions::show_pin(&app, &pin_id, ShowPinMode::AsyncCreate)
+    pin_actions::show_pin(&app, &pin_id, ShowPinMode::AsyncCreate).map_err(|e| e.to_string())
 }
 
 /// 管理界面/托盘：隐藏 Pin（destroy 窗口 + state=hidden）。
@@ -66,6 +77,7 @@ fn hide_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
         return Ok(()); // 幂等
     }
 
+    // M2 修复：窗口销毁失败不静默吞掉，直接返回 Err
     window::hide_pin_window(&app, &pin_id)?;
     registry::REGISTRY.set_state(&pin_id, PinState::Hidden)?;
     tray::refresh(&app);
@@ -73,34 +85,36 @@ fn hide_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
 }
 
 /// 管理界面/托盘：隐藏所有可见 Pin。
+/// M10 修复：复用 pin_actions::hide_all_visible，消除三份拷贝。
 #[tauri::command]
 fn hide_all_pins(app: tauri::AppHandle) -> Result<(), String> {
-    let metas = registry::REGISTRY.list();
-    for meta in metas {
-        if meta.state != PinState::Visible {
-            continue;
-        }
-        if let Err(e) = window::hide_pin_window(&app, &meta.pin_id) {
-            eprintln!("[agent-pin] hide_all window for {}: {}", meta.pin_id, e);
-        }
-        if let Err(e) = registry::REGISTRY.set_state(&meta.pin_id, PinState::Hidden) {
-            eprintln!("[agent-pin] hide_all state for {}: {}", meta.pin_id, e);
-        }
+    let failed = pin_actions::hide_all_visible(&app);
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to hide {} pin(s): {}",
+            failed.len(),
+            failed.join(", ")
+        ))
     }
-    tray::refresh(&app);
-    Ok(())
 }
 
 /// 管理界面：删除 Pin（不可恢复）。
-/// 1. 销毁窗口（如果存在）
-/// 2. 删除 registry entry + pins/{pinId}.json + 更新 state.json
+/// C1 修复：先校验 pin_id 存在于 registry，再销毁窗口。
+/// 原实现先销毁窗口再查 registry，可被滥用销毁非 Pin 窗口（如 manager），
+/// 导致用户失去管理入口（DoS）。现在严格按"先查再销"顺序。
+/// M3 修复：窗口销毁失败不静默吞错，直接返回 Err，避免留下孤儿窗口
+/// （窗口仍存在但 registry 已无记录，无法通过 API 隐藏）。
 #[tauri::command]
 fn delete_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
-    // 1. 销毁窗口（如果存在）
-    if let Err(e) = window::hide_pin_window(&app, &pin_id) {
-        eprintln!("[agent-pin] delete_pin window: {}", e);
-    }
-    // 2. 删除 registry entry + 文件 + state
+    // 1. 先校验 pin_id 存在性（防销毁 manager 等非 Pin 窗口）
+    registry::REGISTRY
+        .get_meta(&pin_id)
+        .ok_or_else(|| format!("pin not found: {}", pin_id))?;
+    // 2. 销毁窗口（失败直接返回 Err，不静默吞错）
+    window::hide_pin_window(&app, &pin_id)?;
+    // 3. 删除 registry entry + 文件 + state
     registry::REGISTRY.remove(&pin_id)?;
     tray::refresh(&app);
     Ok(())
@@ -264,9 +278,25 @@ pub fn run() {
             // Pin 窗口销毁事件：只在 state=visible 时设 hidden。
             // 避免与 hide 路由、show 路由清理孤儿窗口、delete_pin 冲突。
             // 管理界面窗口 label="manager" 已被 CloseRequested 拦截，不会到 Destroyed。
+            //
+            // C1 修复：必须校验当前已无同 label 窗口才设 hidden。
+            // show_pin 在重建窗口时会用同一个 label（pin_id）创建新窗口，
+            // 旧窗口的 Destroyed 事件可能延迟到新窗口创建后才触发，
+            // 此时 get_webview_window(pin_id) 返回 Some（新窗口），
+            // 若直接 set_state(Hidden) 会把新窗口的 state 错误覆盖为 hidden。
+            //
+            // M1 修复（TOCTOU 竞态）：get_webview_window 返回 None 与 set_state(Hidden) 之间
+            // 存在时间窗口，并发 show_pin 可在此间隙创建新窗口并设 Visible，
+            // 随后 set_state(Hidden) 覆盖。修复：set_state(Hidden) 后二次校验窗口是否已重建，
+            // 若是则回滚为 Visible。
             if let tauri::WindowEvent::Destroyed = event {
                 let pin_id = window.label();
                 if pin_id == "manager" {
+                    return;
+                }
+                // 校验：当前已无同 label 窗口才认为是真正的"最后一个窗口被关闭"。
+                // 若新窗口已存在（show_pin 重建场景），跳过 state 更新。
+                if window.app_handle().get_webview_window(pin_id).is_some() {
                     return;
                 }
                 if let Some(meta) = registry::REGISTRY.get_meta(pin_id) {
@@ -275,6 +305,18 @@ pub fn run() {
                             registry::REGISTRY.set_state(pin_id, PinState::Hidden)
                         {
                             eprintln!("[agent-pin] on_window_event set_state: {}", e);
+                        }
+                        // M1 二次校验：set_state(Hidden) 后再次检查窗口是否已重建。
+                        // 若在 set_state 期间有并发的 show_pin 创建了新窗口，回滚为 Visible。
+                        if window.app_handle().get_webview_window(pin_id).is_some() {
+                            if let Err(e) =
+                                registry::REGISTRY.set_state(pin_id, PinState::Visible)
+                            {
+                                eprintln!(
+                                    "[agent-pin] on_window_event rollback set_state: {}",
+                                    e
+                                );
+                            }
                         }
                         // 状态变化，刷新托盘菜单
                         tray::refresh(window.app_handle());

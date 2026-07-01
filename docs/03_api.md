@@ -114,7 +114,11 @@ Content-Type: application/json
 
 **Content-Type 强制要求**：所有 POST 请求必须携带 `Content-Type: application/json`（charset 可选），否则返回 415 + `INVALID_JSON`。这是 CSRF 防护的一部分，阻止浏览器跨站简单 POST。
 
+**Host 头白名单**：所有 POST 请求的 `Host` 头必须为 `127.0.0.1:4317` 或 `localhost:4317`，否则返回 403 + `INTERNAL_ERROR`。这是 CSRF 防御纵深，防 DNS rebinding 攻击。
+
 请求体大小上限：1 MB。
+
+**Pin 数量上限**：registry 中 Pin 总数上限为 500。超过时 `POST /api/pins` 返回 409 + `INTERNAL_ERROR`（`pin count limit reached`）。
 
 请求体：
 
@@ -247,7 +251,11 @@ POST /api/pins/{pinId}/show
 }
 ```
 
+Pin 处于 failed 状态时返回 `INTERNAL_ERROR`（409 CONFLICT），不可显示。
+
 窗口创建失败返回 `WINDOW_CREATE_FAILED`（500）。
+
+持久化失败返回 `INTERNAL_ERROR`（500）。
 
 ---
 
@@ -283,7 +291,9 @@ POST /api/pins/{pinId}/hide
 }
 ```
 
-注意：用户点 Pin 窗口关闭按钮会触发 `WindowEvent::Destroyed`，lib.rs 的事件处理器会自动把状态标记为 hidden（如果当前是 visible）。这与 `POST /hide` 走同一套状态机，但路径不同：前者是窗口事件回调，后者是 HTTP 调用。
+窗口销毁失败返回 `INTERNAL_ERROR`（500）。如果窗口存在但 destroy 失败，状态不会更新为 hidden（避免内存与实际不一致），调用方可重试。
+
+注意：用户点 Pin 窗口关闭按钮会触发 `WindowEvent::Destroyed`，lib.rs 的事件处理器会自动把状态标记为 hidden（如果当前是 visible，且当前无同 label 新窗口）。这与 `POST /hide` 走同一套状态机，但路径不同：前者是窗口事件回调，后者是 HTTP 调用。
 
 ---
 
@@ -297,7 +307,7 @@ Phase：2-B
 POST /api/pins/hide-all
 ```
 
-响应：
+成功响应（全部隐藏成功）：
 
 ```json
 {
@@ -305,7 +315,19 @@ POST /api/pins/hide-all
 }
 ```
 
-即使部分窗口销毁失败，也继续处理其余 Pin，错误记录到 stderr 但不中断。最终始终返回 ok。
+部分失败响应（某些 Pin 窗口销毁或状态更新失败，但继续处理其余 Pin）：
+
+返回 `207 Multi-Status` + `INTERNAL_ERROR`，message 中列出失败的 pinId：
+
+```json
+{
+  "ok": false,
+  "code": "INTERNAL_ERROR",
+  "message": "some pins could not be hidden: pin_xxx, pin_yyy"
+}
+```
+
+`message` 中列出失败的 pinId。调用方可据此决定是否重试。部分失败时 HTTP 状态码为 207（与 Tauri `hide_all_pins` 命令返回 `Err` 的行为一致）。
 
 ---
 

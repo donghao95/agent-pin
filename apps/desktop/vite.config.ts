@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// Tauri 期望前端 dev server 跑在 1420 端口
+// Tauri devUrl 已同步配置为 1800（1420 在 Windows Hyper-V 保留端口范围）
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,

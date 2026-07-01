@@ -60,14 +60,16 @@ function syncJson(file) {
 function syncCargoToml(file) {
   const path = join(root, file);
   const raw = readFileSync(path, 'utf8');
-  // 只替换 [package] 段下的第一行 version = "..."
-  const re = /(^version\s*=\s*")[^"]+(")/m;
+  // 用三个捕获组提取 version 值，避免 slice 假设固定字符数。
+  // group1 = 前缀（"version = \""，含可能的前导空白），group2 = 旧版本号，group3 = 后缀（"\""）。
+  // m 锚点 + \s* 兼容 "version=..." 与 "version = ..." 等不同空白格式。
+  const re = /^(\s*version\s*=\s*")([^"]+)(")/m;
   const m = raw.match(re);
   if (!m) {
     console.error(`[sync-version] cannot find version field in ${file}`);
     process.exit(1);
   }
-  const before = m[0].slice('version = "'.length, -1);
+  const before = m[2];
   if (before === version) {
     results.push({ file, ok: true });
     return;
@@ -76,7 +78,8 @@ function syncCargoToml(file) {
     results.push({ file, ok: false, before });
     return;
   }
-  const next = raw.replace(re, `$1${version}$2`);
+  // 替换时保留原始前缀/后缀格式（引号与空白），仅替换捕获组 2 的值
+  const next = raw.replace(re, `$1${version}$3`);
   writeFileSync(path, next, 'utf8');
   results.push({ file, ok: true, before, after: version });
 }

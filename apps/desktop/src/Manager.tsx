@@ -1,24 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-
-// 与后端 storage.rs 对齐
-type PinState = "visible" | "hidden" | "failed";
-
-type PinSource = {
-  agent?: string;
-  workspace?: string;
-  task?: string;
-  conversationId?: string;
-};
-
-type PinMeta = {
-  pinId: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  state: PinState;
-  source?: PinSource;
-};
+import { listen } from "@tauri-apps/api/event";
+import type { PinMeta, PinState } from "./types";
 
 export default function Manager() {
   const [pins, setPins] = useState<PinMeta[]>([]);
@@ -30,8 +13,9 @@ export default function Manager() {
   // M8：隐藏全部操作锁
   const [hidingAll, setHidingAll] = useState(false);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  // silent=true 时不清 loading 状态，避免单 Pin 操作后刷新按钮闪烁（m11）
+  const refresh = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const list = await invoke<PinMeta[]>("list_pins");
@@ -39,7 +23,7 @@ export default function Manager() {
     } catch (e) {
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
@@ -47,11 +31,26 @@ export default function Manager() {
     refresh();
   }, [refresh]);
 
+  // m3：监听后端 pin:show-failed 事件（AsyncCreate 模式下窗口创建失败时触发）
+  // 后端 show_pin 用 AsyncCreate 立即返回 Ok，窗口异步创建失败时通过此事件通知
+  useEffect(() => {
+    const unlistenPromise = listen<{ pinId: string; message: string }>(
+      "pin:show-failed",
+      (event) => {
+        setError(`显示失败 (${event.payload.pinId}): ${event.payload.message}`);
+        refresh(true);
+      }
+    );
+    return () => {
+      unlistenPromise.then((fn) => fn()).catch(() => {});
+    };
+  }, [refresh]);
+
   const handleShow = async (pinId: string) => {
     setBusyPinIds((prev) => new Set(prev).add(pinId));
     try {
       await invoke("show_pin", { pinId });
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setError(`显示失败: ${e}`);
     } finally {
@@ -67,7 +66,7 @@ export default function Manager() {
     setBusyPinIds((prev) => new Set(prev).add(pinId));
     try {
       await invoke("hide_pin", { pinId });
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setError(`隐藏失败: ${e}`);
     } finally {
@@ -83,7 +82,7 @@ export default function Manager() {
     setHidingAll(true);
     try {
       await invoke("hide_all_pins");
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setError(`隐藏全部失败: ${e}`);
     } finally {
@@ -96,7 +95,7 @@ export default function Manager() {
     setBusyPinIds((prev) => new Set(prev).add(pinId));
     try {
       await invoke("delete_pin", { pinId });
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setError(`删除失败: ${e}`);
     } finally {
@@ -117,19 +116,27 @@ export default function Manager() {
   };
 
   // 前端过滤：按 title 或 source.agent 匹配关键词
-  const filtered = pins.filter((p) => {
-    if (!keyword.trim()) return true;
+  const filtered = useMemo(() => {
+    if (!keyword.trim()) return pins;
     const kw = keyword.trim().toLowerCase();
-    const inTitle = p.title.toLowerCase().includes(kw);
-    const inAgent = p.source?.agent?.toLowerCase().includes(kw) ?? false;
-    const inWorkspace =
-      p.source?.workspace?.toLowerCase().includes(kw) ?? false;
-    return inTitle || inAgent || inWorkspace;
-  });
+    return pins.filter((p) => {
+      const inTitle = p.title.toLowerCase().includes(kw);
+      const inAgent = p.source?.agent?.toLowerCase().includes(kw) ?? false;
+      const inWorkspace =
+        p.source?.workspace?.toLowerCase().includes(kw) ?? false;
+      return inTitle || inAgent || inWorkspace;
+    });
+  }, [pins, keyword]);
 
-  const visibleCount = pins.filter((p) => p.state === "visible").length;
-  const hiddenCount = pins.filter((p) => p.state === "hidden").length;
-  const failedCount = pins.filter((p) => p.state === "failed").length;
+  const { visibleCount, hiddenCount, failedCount } = useMemo(() => {
+    let v = 0, h = 0, f = 0;
+    for (const p of pins) {
+      if (p.state === "visible") v++;
+      else if (p.state === "hidden") h++;
+      else if (p.state === "failed") f++;
+    }
+    return { visibleCount: v, hiddenCount: h, failedCount: f };
+  }, [pins]);
 
   return (
     <div className="manager-root">
@@ -161,7 +168,7 @@ export default function Manager() {
           />
           <button
             className="manager-btn"
-            onClick={refresh}
+            onClick={() => refresh()}
             disabled={loading}
             title="刷新列表"
           >
@@ -170,7 +177,7 @@ export default function Manager() {
           <button
             className="manager-btn"
             onClick={handleHideAll}
-            disabled={hidingAll || visibleCount === 0}
+            disabled={hidingAll || visibleCount === 0 || busyPinIds.size > 0}
             title="隐藏所有可见 Pin"
           >
             {hidingAll ? "隐藏中…" : "隐藏全部"}
