@@ -14,7 +14,7 @@
 //
 // 契约来源：docs/ui-style.md §4、docs/mvp-spec.md §12
 
-use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::pin::{PinDocument, PinHeight};
 
@@ -44,7 +44,6 @@ pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Re
     let always_on_top = win_cfg.and_then(|w| w.always_on_top).unwrap_or(true);
 
     // height：数值直接用，"auto" 或未指定用 DEFAULT_HEIGHT。
-    // 之后会 clamp 到屏幕高度的 70%。
     let requested_height = win_cfg
         .and_then(|w| w.height.as_ref())
         .map(|h| match h {
@@ -53,19 +52,27 @@ pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Re
         })
         .unwrap_or(DEFAULT_HEIGHT);
 
+    // M8 修复：在 build 之前 clamp 高度，避免 build 后 set_size 产生闪烁。
+    // M9 修复：primary_monitor 统一用 get_screen_size 辅助函数处理 None。
+    let height = match get_screen_size(app) {
+        Some((_, screen_h)) => {
+            let max_h = screen_h * MAX_HEIGHT_RATIO;
+            requested_height.min(max_h)
+        }
+        None => requested_height, // 无显示器信息，不 clamp（极端环境兜底）
+    };
+
     // 位置：如果请求体指定了 x,y 就用，否则级联
-    let (x, y) = if let (Some(x), Some(y)) = (
-        win_cfg.and_then(|w| w.x),
-        win_cfg.and_then(|w| w.y),
-    ) {
+    let (x, y) = if let (Some(x), Some(y)) = (win_cfg.and_then(|w| w.x), win_cfg.and_then(|w| w.y))
+    {
         (x as f64, y as f64)
     } else {
         compute_cascade_position(app, width)?
     };
 
-    let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    let _window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title(&doc.title)
-        .inner_size(width, requested_height)
+        .inner_size(width, height)
         .position(x, y)
         // 自定义轻标题栏：去掉系统装饰
         .decorations(false)
@@ -81,19 +88,6 @@ pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Re
         .visible(true)
         .build()
         .map_err(|e| format!("failed to create pin window: {}", e))?;
-
-    // 限制最大高度为屏幕高度的 70%（ui-style.md §4 契约）
-    if let Ok(Some(monitor)) = app.primary_monitor() {
-        let scale = monitor.scale_factor();
-        let screen_h = monitor.size().height as f64 / scale;
-        let max_h = screen_h * MAX_HEIGHT_RATIO;
-        if requested_height > max_h {
-            // set_size 失败不 panic，但记录日志，避免静默吞错（AGENTS.md）
-            if let Err(e) = window.set_size(LogicalSize::new(width, max_h)) {
-                eprintln!("[agent-pin] set_size clamp failed for {}: {}", pin_id, e);
-            }
-        }
-    }
 
     Ok(())
 }
@@ -112,19 +106,17 @@ pub fn hide_pin_window(app: &AppHandle, pin_id: &str) -> Result<(), String> {
 
 /// 计算级联位置：右上角出生，向左下偏移。
 fn compute_cascade_position(app: &AppHandle, win_w: f64) -> Result<(f64, f64), String> {
-    let monitor = app
-        .primary_monitor()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no primary monitor".to_string())?;
-    let scale = monitor.scale_factor();
-    let screen_w = monitor.size().width as f64 / scale;
-    let screen_h = monitor.size().height as f64 / scale;
+    // M9 修复：primary_monitor None 时返回 Err（与无显示器环境一致，不静默兜底）
+    let (screen_w, screen_h) =
+        get_screen_size(app).ok_or_else(|| "no primary monitor".to_string())?;
 
-    // 当前已有 Pin 窗口数决定偏移（排除 manager 窗口，它不是 Pin）
+    // M7 修复：只统计当前可见的 Pin 窗口，排除正在销毁/已隐藏的窗口。
+    // 原先 count 包含所有 webview_windows（含正在 destroy 的），导致偏移过大。
     let count = app
         .webview_windows()
         .values()
         .filter(|w| w.label() != "manager")
+        .filter(|w| w.is_visible().unwrap_or(false))
         .count();
     let offset = (count as f64) * CASCADE_OFFSET;
 
@@ -133,4 +125,15 @@ fn compute_cascade_position(app: &AppHandle, win_w: f64) -> Result<(f64, f64), S
     let y = (MARGIN + offset).min(screen_h * 0.7);
 
     Ok((x, y))
+}
+
+/// 获取主显示器的逻辑尺寸（宽, 高）。
+/// M9 修复：统一 primary_monitor 的 None 处理，避免 create_pin_window 和 compute_cascade_position 不一致。
+/// 返回 None 表示无显示器信息（headless 等极端环境）。
+fn get_screen_size(app: &AppHandle) -> Option<(f64, f64)> {
+    let monitor = app.primary_monitor().ok().flatten()?;
+    let scale = monitor.scale_factor();
+    let screen_w = monitor.size().width as f64 / scale;
+    let screen_h = monitor.size().height as f64 / scale;
+    Some((screen_w, screen_h))
 }

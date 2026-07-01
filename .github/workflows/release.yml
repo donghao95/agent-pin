@@ -84,9 +84,18 @@ jobs:
           cd packages/cli/target/release
           7z a "${GITHUB_WORKSPACE}/agent-pin-${VERSION}-windows-x64.zip" agent-pin.exe
 
+      - name: Generate CLI checksum
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          cd "${GITHUB_WORKSPACE}"
+          sha256sum "agent-pin-${VERSION}-windows-x64.zip" > "agent-pin-${VERSION}-windows-x64.zip.sha256"
+
       - name: Upload CLI asset
         uses: softprops/action-gh-release@v2
         with:
-          files: agent-pin-*-windows-x64.zip
+          files: |
+            agent-pin-*-windows-x64.zip
+            agent-pin-*-windows-x64.zip.sha256
           fail_on_unmatched_files: true
           prerelease: true

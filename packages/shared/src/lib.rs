@@ -128,10 +128,21 @@ pub const MAX_TITLE_CHARS: usize = 1024;
 pub const MAX_CONTENT_BYTES: usize = 256 * 1024;
 /// blocks 数量上限。
 pub const MAX_BLOCKS: usize = 50;
+/// image caption 上限 1024 字符（与 title 一致，按 chars 计）。
+pub const MAX_CAPTION_CHARS: usize = 1024;
+/// status text 上限 4096 字符（比 title 长，但仍有限防膨胀）。
+pub const MAX_STATUS_TEXT_CHARS: usize = 4096;
+/// source 各字段上限 256 字符。
+pub const MAX_SOURCE_FIELD_CHARS: usize = 256;
+/// image path 长度上限（字节）。防超长 path 导致持久化膨胀和前端渲染问题。
+pub const MAX_IMAGE_PATH_BYTES: usize = 4096;
 /// 窗口宽度/高度数值下限（防 0 或极小值导致不可见窗口）。
 pub const MIN_WINDOW_DIMENSION: u32 = 1;
 /// 窗口宽度/高度数值上限（防超出屏幕导致创建失败）。
 pub const MAX_WINDOW_DIMENSION: u32 = 100_000;
+/// 窗口 x/y 坐标范围（防极值导致窗口创建 panic）。
+pub const MIN_WINDOW_POS: i32 = -100_000;
+pub const MAX_WINDOW_POS: i32 = 100_000;
 
 /// 支持的图片扩展名白名单（docs/01_product_spec.md §8）。
 /// 同时用于 HTTP 校验和前端防御，避免 asset protocol 加载非图片文件。
@@ -146,11 +157,22 @@ pub struct PinError {
 
 impl PinError {
     pub fn new(code: PinErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 }
 
 // ---------- 校验 ----------
+
+/// 检查字符串是否包含不允许的控制字符。
+/// 允许 \n \t \r（正常文本换行/制表符），拒绝其他 C0 控制符和 null 字节。
+/// 防止 null 字节注入底层 C API（如 Tauri asset protocol 文件路径截断）。
+fn has_disallowed_control_chars(s: &str) -> bool {
+    s.chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r')
+}
 
 /// 校验 PinDocument。
 /// Phase 2 起接受 markdown / image / status block，支持多 block 混排。
@@ -161,6 +183,14 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
         return Err(PinError::new(
             PinErrorCode::InvalidPinDocument,
             "version must be 1",
+        ));
+    }
+    // 控制字符校验：拒绝 null 字节和其他 C0 控制符，防止底层 API 截断和渲染异常。
+    // 允许 \n \t \r（正常 Markdown 文本需要）。
+    if has_disallowed_control_chars(&doc.title) {
+        return Err(PinError::new(
+            PinErrorCode::InvalidPinDocument,
+            "title must not contain control characters",
         ));
     }
     if doc.title.trim().is_empty() {
@@ -176,11 +206,32 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
             format!("title too long (max {} chars)", MAX_TITLE_CHARS),
         ));
     }
+    // source 各字段长度校验（防持久化文件膨胀和前端列表异常）
+    if let Some(src) = &doc.source {
+        for (name, val) in [
+            ("agent", src.agent.as_deref()),
+            ("workspace", src.workspace.as_deref()),
+            ("task", src.task.as_deref()),
+            ("conversationId", src.conversation_id.as_deref()),
+        ] {
+            if let Some(s) = val {
+                if s.chars().count() > MAX_SOURCE_FIELD_CHARS {
+                    return Err(PinError::new(
+                        PinErrorCode::InvalidPinDocument,
+                        format!(
+                            "source.{} too long (max {} chars)",
+                            name, MAX_SOURCE_FIELD_CHARS
+                        ),
+                    ));
+                }
+            }
+        }
+    }
     // 校验 window 数值范围：width/height(Number) 必须在 [MIN, MAX] 内，
     // 防 0 或极小值导致不可见窗口，防超大值导致创建失败（M11）。
     if let Some(win) = &doc.window {
         if let Some(w) = win.width {
-            if w < MIN_WINDOW_DIMENSION || w > MAX_WINDOW_DIMENSION {
+            if !(MIN_WINDOW_DIMENSION..=MAX_WINDOW_DIMENSION).contains(&w) {
                 return Err(PinError::new(
                     PinErrorCode::InvalidPinDocument,
                     format!(
@@ -197,14 +248,23 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
         // "must be \"auto\""。这是 untagged 的固有行为，错误信息已尽量清晰。
         if let Some(PinHeight::Auto(s)) = &win.height {
             if s != "auto" {
+                // 如果是字符串数字（如 "100"），给出更明确的提示
+                let hint = if s.parse::<u32>().is_ok() {
+                    format!(
+                        "; if you mean height {}, use JSON number {} instead of string \"{}\"",
+                        s, s, s
+                    )
+                } else {
+                    String::new()
+                };
                 return Err(PinError::new(
                     PinErrorCode::InvalidPinDocument,
-                    format!("window.height string must be \"auto\", got {:?}", s),
+                    format!("window.height string must be \"auto\", got {:?}{}", s, hint),
                 ));
             }
         }
         if let Some(PinHeight::Number(n)) = &win.height {
-            if *n < MIN_WINDOW_DIMENSION || *n > MAX_WINDOW_DIMENSION {
+            if !(MIN_WINDOW_DIMENSION..=MAX_WINDOW_DIMENSION).contains(n) {
                 return Err(PinError::new(
                     PinErrorCode::InvalidPinDocument,
                     format!(
@@ -214,7 +274,28 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
                 ));
             }
         }
-        // x/y 数值范围不校验：负数合法（可离屏），超大值由 OS 处理。
+        if let Some(x) = win.x {
+            if !(MIN_WINDOW_POS..=MAX_WINDOW_POS).contains(&x) {
+                return Err(PinError::new(
+                    PinErrorCode::InvalidPinDocument,
+                    format!(
+                        "window.x must be in [{}..{}], got {}",
+                        MIN_WINDOW_POS, MAX_WINDOW_POS, x
+                    ),
+                ));
+            }
+        }
+        if let Some(y) = win.y {
+            if !(MIN_WINDOW_POS..=MAX_WINDOW_POS).contains(&y) {
+                return Err(PinError::new(
+                    PinErrorCode::InvalidPinDocument,
+                    format!(
+                        "window.y must be in [{}..{}], got {}",
+                        MIN_WINDOW_POS, MAX_WINDOW_POS, y
+                    ),
+                ));
+            }
+        }
     }
     if doc.blocks.is_empty() {
         return Err(PinError::new(
@@ -237,6 +318,12 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
                         format!("blocks[{}].content must be non-empty", i),
                     ));
                 }
+                if has_disallowed_control_chars(&m.content) {
+                    return Err(PinError::new(
+                        PinErrorCode::InvalidPinDocument,
+                        format!("blocks[{}].content must not contain control characters", i),
+                    ));
+                }
                 if m.content.len() > MAX_CONTENT_BYTES {
                     return Err(PinError::new(
                         PinErrorCode::InvalidPinDocument,
@@ -253,6 +340,39 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
                         PinErrorCode::InvalidPinDocument,
                         format!("blocks[{}].path must be non-empty", i),
                     ));
+                }
+                if has_disallowed_control_chars(&img.path) {
+                    return Err(PinError::new(
+                        PinErrorCode::InvalidPinDocument,
+                        format!("blocks[{}].path must not contain control characters", i),
+                    ));
+                }
+                if img.path.len() > MAX_IMAGE_PATH_BYTES {
+                    return Err(PinError::new(
+                        PinErrorCode::InvalidPinDocument,
+                        format!(
+                            "blocks[{}].path too long (max {} bytes)",
+                            i, MAX_IMAGE_PATH_BYTES
+                        ),
+                    ));
+                }
+                // caption 校验：控制字符 + 长度
+                if let Some(cap) = &img.caption {
+                    if has_disallowed_control_chars(cap) {
+                        return Err(PinError::new(
+                            PinErrorCode::InvalidPinDocument,
+                            format!("blocks[{}].caption must not contain control characters", i),
+                        ));
+                    }
+                    if cap.chars().count() > MAX_CAPTION_CHARS {
+                        return Err(PinError::new(
+                            PinErrorCode::InvalidPinDocument,
+                            format!(
+                                "blocks[{}].caption too long (max {} chars)",
+                                i, MAX_CAPTION_CHARS
+                            ),
+                        ));
+                    }
                 }
                 // path 必须是绝对路径（docs/01_product_spec.md §8）。
                 // 不校验文件存在性：desktop 不知道 Agent cwd，前端 <img> onerror 处理。
@@ -286,11 +406,30 @@ pub fn validate(doc: &PinDocument) -> Result<(), PinError> {
                         format!("blocks[{}].text must be non-empty", i),
                     ));
                 }
+                if has_disallowed_control_chars(&s.text) {
+                    return Err(PinError::new(
+                        PinErrorCode::InvalidPinDocument,
+                        format!("blocks[{}].text must not contain control characters", i),
+                    ));
+                }
+                // text 长度校验（防前端卡顿）
+                if s.text.chars().count() > MAX_STATUS_TEXT_CHARS {
+                    return Err(PinError::new(
+                        PinErrorCode::InvalidPinDocument,
+                        format!(
+                            "blocks[{}].text too long (max {} chars)",
+                            i, MAX_STATUS_TEXT_CHARS
+                        ),
+                    ));
+                }
                 if let Some(level) = &s.level {
                     if !matches!(level.as_str(), "info" | "success" | "warning" | "error") {
                         return Err(PinError::new(
                             PinErrorCode::InvalidPinDocument,
-                            format!("blocks[{}].level must be one of info/success/warning/error", i),
+                            format!(
+                                "blocks[{}].level must be one of info/success/warning/error",
+                                i
+                            ),
                         ));
                     }
                 }
@@ -388,7 +527,11 @@ mod tests {
     fn test_too_many_blocks() {
         let mut doc = valid_doc();
         doc.blocks = (0..MAX_BLOCKS + 1)
-            .map(|_| PinBlock::Markdown(MarkdownBlock { content: "x".to_string() }))
+            .map(|_| {
+                PinBlock::Markdown(MarkdownBlock {
+                    content: "x".to_string(),
+                })
+            })
             .collect();
         assert!(validate(&doc).is_err());
     }
@@ -492,7 +635,10 @@ mod tests {
             path: abs_path.to_string(),
             caption: None,
         })];
-        assert!(validate(&doc).is_ok(), "uppercase extension should be valid");
+        assert!(
+            validate(&doc).is_ok(),
+            "uppercase extension should be valid"
+        );
     }
 
     #[test]
@@ -536,5 +682,248 @@ mod tests {
             Some(PinHeight::Auto(s)) => assert_eq!(s, "100"),
             other => panic!("expected Auto(\"100\"), got {:?}", other),
         }
+    }
+
+    // ---------- 边界值与混合 block 测试 ----------
+
+    #[test]
+    fn test_mixed_blocks() {
+        // 多 block 混排（Phase 2 核心能力）
+        let mut doc = valid_doc();
+        let abs_path = if cfg!(windows) {
+            "C:\\abs\\img.png"
+        } else {
+            "/abs/img.png"
+        };
+        doc.blocks = vec![
+            PinBlock::Markdown(MarkdownBlock {
+                content: "title".to_string(),
+            }),
+            PinBlock::Image(ImageBlock {
+                path: abs_path.to_string(),
+                caption: Some("fig".to_string()),
+            }),
+            PinBlock::Status(StatusBlock {
+                level: Some("info".to_string()),
+                text: "ok".to_string(),
+            }),
+        ];
+        assert!(validate(&doc).is_ok());
+    }
+
+    #[test]
+    fn test_image_path_whitespace_only() {
+        let mut doc = valid_doc();
+        let abs_path = if cfg!(windows) {
+            "C:\\abs\\   "
+        } else {
+            "/abs/   "
+        };
+        doc.blocks = vec![PinBlock::Image(ImageBlock {
+            path: abs_path.to_string(),
+            caption: None,
+        })];
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_image_path_no_extension() {
+        let mut doc = valid_doc();
+        let abs_path = if cfg!(windows) {
+            "C:\\abs\\img"
+        } else {
+            "/abs/img"
+        };
+        doc.blocks = vec![PinBlock::Image(ImageBlock {
+            path: abs_path.to_string(),
+            caption: None,
+        })];
+        let err = validate(&doc).unwrap_err();
+        assert_eq!(err.code, PinErrorCode::ImageUnsupported);
+    }
+
+    #[test]
+    fn test_markdown_content_whitespace_only() {
+        let mut doc = valid_doc();
+        doc.blocks = vec![PinBlock::Markdown(MarkdownBlock {
+            content: "   \n  ".to_string(),
+        })];
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_window_width_too_large() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: Some(MAX_WINDOW_DIMENSION + 1),
+            height: None,
+            x: None,
+            y: None,
+            always_on_top: None,
+        });
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_title_exactly_at_limit() {
+        let mut doc = valid_doc();
+        doc.title = "a".repeat(MAX_TITLE_CHARS);
+        assert!(validate(&doc).is_ok());
+    }
+
+    #[test]
+    fn test_blocks_exactly_at_limit() {
+        let mut doc = valid_doc();
+        doc.blocks = (0..MAX_BLOCKS)
+            .map(|_| {
+                PinBlock::Markdown(MarkdownBlock {
+                    content: "x".to_string(),
+                })
+            })
+            .collect();
+        assert!(validate(&doc).is_ok());
+    }
+
+    #[test]
+    fn test_caption_too_long() {
+        let mut doc = valid_doc();
+        let abs_path = if cfg!(windows) {
+            "C:\\abs\\img.png"
+        } else {
+            "/abs/img.png"
+        };
+        doc.blocks = vec![PinBlock::Image(ImageBlock {
+            path: abs_path.to_string(),
+            caption: Some("a".repeat(MAX_CAPTION_CHARS + 1)),
+        })];
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_status_text_too_long() {
+        let mut doc = valid_doc();
+        doc.blocks = vec![PinBlock::Status(StatusBlock {
+            level: None,
+            text: "a".repeat(MAX_STATUS_TEXT_CHARS + 1),
+        })];
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_source_field_too_long() {
+        let mut doc = valid_doc();
+        doc.source = Some(PinSource {
+            agent: Some("a".repeat(MAX_SOURCE_FIELD_CHARS + 1)),
+            workspace: None,
+            task: None,
+            conversation_id: None,
+        });
+        assert!(validate(&doc).is_err());
+    }
+
+    // ---------- M7/M8 新增：path 长度、控制字符、window x/y 范围 ----------
+
+    #[test]
+    fn test_image_path_too_long() {
+        let mut doc = valid_doc();
+        let abs_path = if cfg!(windows) {
+            format!("C:\\abs\\{}.png", "a".repeat(MAX_IMAGE_PATH_BYTES))
+        } else {
+            format!("/abs/{}.png", "a".repeat(MAX_IMAGE_PATH_BYTES))
+        };
+        doc.blocks = vec![PinBlock::Image(ImageBlock {
+            path: abs_path,
+            caption: None,
+        })];
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_title_control_chars_rejected() {
+        let mut doc = valid_doc();
+        doc.title = "hello\0world".to_string();
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_markdown_content_allows_newline() {
+        let mut doc = valid_doc();
+        doc.blocks = vec![PinBlock::Markdown(MarkdownBlock {
+            content: "line1\nline2\ttabbed".to_string(),
+        })];
+        assert!(validate(&doc).is_ok());
+    }
+
+    #[test]
+    fn test_markdown_content_null_byte_rejected() {
+        let mut doc = valid_doc();
+        doc.blocks = vec![PinBlock::Markdown(MarkdownBlock {
+            content: "evil\0content".to_string(),
+        })];
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_image_path_null_byte_rejected() {
+        let mut doc = valid_doc();
+        doc.blocks = vec![PinBlock::Image(ImageBlock {
+            path: "C:\\safe\\img.png\0.evil".to_string(),
+            caption: None,
+        })];
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_window_x_out_of_range() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: None,
+            height: None,
+            x: Some(MAX_WINDOW_POS + 1),
+            y: None,
+            always_on_top: None,
+        });
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_window_y_negative_extreme() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: None,
+            height: None,
+            x: None,
+            y: Some(MIN_WINDOW_POS - 1),
+            always_on_top: None,
+        });
+        assert!(validate(&doc).is_err());
+    }
+
+    #[test]
+    fn test_window_x_at_boundary() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: None,
+            height: None,
+            x: Some(MAX_WINDOW_POS),
+            y: Some(MIN_WINDOW_POS),
+            always_on_top: None,
+        });
+        assert!(validate(&doc).is_ok());
+    }
+
+    #[test]
+    fn test_pin_height_string_number_error_hint() {
+        let mut doc = valid_doc();
+        doc.window = Some(PinWindowConfig {
+            width: None,
+            height: Some(PinHeight::Auto("100".to_string())),
+            x: None,
+            y: None,
+            always_on_top: None,
+        });
+        let err = validate(&doc).unwrap_err();
+        // 错误信息应包含提示用数字而非字符串
+        assert!(err.message.contains("use JSON number"));
     }
 }

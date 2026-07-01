@@ -15,6 +15,7 @@
 // 契约来源：docs/api.md
 // 路径参数使用 axum 0.8+ 的 {pinId} 语法（不是 :pinId）。
 
+use axum::extract::Request;
 use axum::{
     extract::{Path, State},
     http::{Method, StatusCode},
@@ -23,7 +24,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use axum::extract::Request;
 use serde_json::{json, Value};
 use tauri::AppHandle;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -33,6 +33,10 @@ use crate::storage::PinState;
 
 /// 请求体最大 1MB
 const MAX_BODY: usize = 1024 * 1024;
+
+/// Pin 总数上限。防止本地恶意进程循环创建海量 Pin 导致窗口句柄/GDI 耗尽、
+/// 内存膨胀、磁盘膨胀、state.json 全量重写阻塞 I/O（M2 DoS 防护）。
+const MAX_PIN_COUNT: usize = 500;
 
 /// 启动 HTTP server。listener 由 setup hook 同步绑定后传入。
 /// bind 在 setup hook 中执行，失败可直接弹窗 + 退出；这里只负责把 std listener
@@ -99,6 +103,15 @@ async fn create_pin(
         return Err(err_response(StatusCode::BAD_REQUEST, e.code, e.message));
     }
 
+    // M2：Pin 总数限制，防 DoS。超过上限返回 409 Conflict。
+    if crate::registry::REGISTRY.list().len() >= MAX_PIN_COUNT {
+        return Err(err_response(
+            StatusCode::CONFLICT,
+            PinErrorCode::InternalError,
+            format!("pin count limit reached (max {})", MAX_PIN_COUNT),
+        ));
+    }
+
     // 3. 生成 pinId 并持久化（写 pins/{pinId}.json + state.json）
     //    insert 返回 Result<PinMeta, String>：doc 写盘失败时返回 Err
     let pin_id = crate::registry::generate_pin_id();
@@ -116,8 +129,7 @@ async fn create_pin(
         if let Err(rollback_err) = crate::registry::REGISTRY.remove(&pin_id) {
             eprintln!(
                 "[agent-pin] rollback remove failed for {}: {}",
-                pin_id,
-                rollback_err
+                pin_id, rollback_err
             );
         }
         return Err(err_response(
@@ -180,9 +192,17 @@ async fn hide_pin(
         return Ok(Json(json!({ "ok": true })));
     }
 
-    // 3. 销毁窗口（如果存在）。窗口不存在不算错误。
+    // 3. 销毁窗口（如果存在）。
+    //    M2 修复：窗口销毁失败不再静默吞掉。若窗口存在但 destroy 失败，
+    //    窗口仍可见，此时设 state=hidden 会导致内存与实际不一致。
+    //    返回 500 让调用方知道窗口未被关闭，可重试。
+    //    窗口不存在（幂等 Ok）不触发此分支。
     if let Err(e) = crate::window::hide_pin_window(&app, &pin_id) {
-        eprintln!("[agent-pin] hide_pin_window for {}: {}", pin_id, e);
+        return Err(err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            PinErrorCode::InternalError,
+            format!("failed to destroy window for {}: {}", pin_id, e),
+        ));
     }
 
     // 4. 设状态 hidden
@@ -202,24 +222,21 @@ async fn hide_pin(
 
 // ---------- POST /api/pins/hide-all ----------
 
-async fn hide_all_pins(State(app): State<AppHandle>) -> Json<Value> {
-    let metas = crate::registry::REGISTRY.list();
-    for meta in metas {
-        if meta.state != PinState::Visible {
-            continue;
-        }
-        // 销毁窗口
-        if let Err(e) = crate::window::hide_pin_window(&app, &meta.pin_id) {
-            eprintln!("[agent-pin] hide-all window for {}: {}", meta.pin_id, e);
-        }
-        // 设状态 hidden
-        if let Err(e) = crate::registry::REGISTRY.set_state(&meta.pin_id, PinState::Hidden) {
-            eprintln!("[agent-pin] hide-all set_state for {}: {}", meta.pin_id, e);
-        }
+/// m4：与 Tauri hide_all_pins 命令行为统一——有失败时返回非 2xx，
+/// 让调用方明确知道操作未完全成功。HTTP 返回 207 Multi-Status + failed 列表。
+async fn hide_all_pins(
+    State(app): State<AppHandle>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let failed = crate::pin_actions::hide_all_visible(&app);
+    if failed.is_empty() {
+        Ok(Json(json!({ "ok": true })))
+    } else {
+        Err(err_response(
+            StatusCode::MULTI_STATUS,
+            PinErrorCode::InternalError,
+            format!("some pins could not be hidden: {}", failed.join(", ")),
+        ))
     }
-    // 刷新托盘菜单（隐藏的 Pin 进入 hidden 快恢列表，与 hide_pin 路由保持一致）
-    crate::tray::refresh(&app);
-    Json(json!({ "ok": true }))
 }
 
 // ---------- 错误响应辅助 ----------
@@ -230,8 +247,8 @@ fn err_response(
     code: PinErrorCode,
     message: String,
 ) -> (StatusCode, Json<Value>) {
-    let code_value = serde_json::to_value(&code)
-        .unwrap_or_else(|_| Value::String("INTERNAL_ERROR".into()));
+    let code_value =
+        serde_json::to_value(&code).unwrap_or_else(|_| Value::String("INTERNAL_ERROR".into()));
     (
         status,
         Json(json!({
@@ -244,22 +261,24 @@ fn err_response(
     )
 }
 
-fn show_pin_err_response(message: String) -> (StatusCode, Json<Value>) {
-    if message.starts_with("pin not found:") {
-        return err_response(StatusCode::NOT_FOUND, PinErrorCode::PinNotFound, message);
-    }
-    if message.starts_with("failed to create pin window:") {
-        return err_response(
+/// M1 修复：用类型化 ShowPinError 替代字符串前缀匹配，可靠映射 HTTP 状态码。
+fn show_pin_err_response(e: crate::pin_actions::ShowPinError) -> (StatusCode, Json<Value>) {
+    use crate::pin_actions::ShowPinError;
+    let (status, code, message) = match e {
+        ShowPinError::NotFound(msg) => (StatusCode::NOT_FOUND, PinErrorCode::PinNotFound, msg),
+        ShowPinError::Failed(msg) => (StatusCode::CONFLICT, PinErrorCode::InternalError, msg),
+        ShowPinError::WindowCreate(msg) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             PinErrorCode::WindowCreateFailed,
-            message,
-        );
-    }
-    err_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        PinErrorCode::InternalError,
-        message,
-    )
+            msg,
+        ),
+        ShowPinError::Internal(msg) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            PinErrorCode::InternalError,
+            msg,
+        ),
+    };
+    err_response(status, code, message)
 }
 
 // ---------- CSRF 防护 ----------
@@ -269,8 +288,26 @@ fn show_pin_err_response(message: String) -> (StatusCode, Json<Value>) {
 /// 我们不响应 CORS，preflight 失败 → 实际请求不会发出。
 /// text/plain 是简单请求不发 preflight，必须拒绝（防 CSRF）。
 /// CLI 的 ureq 已显式设 Content-Type: application/json，不受影响。
+///
+/// m1 防御纵深：额外校验 Host 头，只允许 127.0.0.1:4317 和 localhost:4317。
+/// 防 DNS rebinding 攻击（攻击者把恶意域名 DNS 解析到 127.0.0.1）。
 async fn csrf_guard(req: Request, next: Next) -> Response {
     if req.method() == Method::POST {
+        // m1：Host 头白名单校验（防御纵深，防 DNS rebinding）
+        let host = req
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if host != "127.0.0.1:4317" && host != "localhost:4317" {
+            return err_response(
+                StatusCode::FORBIDDEN,
+                PinErrorCode::InternalError,
+                "host not allowed".to_string(),
+            )
+            .into_response();
+        }
+
         let ct = req
             .headers()
             .get(axum::http::header::CONTENT_TYPE)

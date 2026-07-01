@@ -36,10 +36,9 @@ jobs:
       - name: Cache pnpm store
         uses: actions/cache@v4
         with:
+          # 只缓存 pnpm 全局 store，不缓存 node_modules（pnpm install 会基于 store 重建，缓存 node_modules 是反模式）
           path: |
             ~/.pnpm-store
-            node_modules
-            apps/desktop/node_modules
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
@@ -47,12 +46,14 @@ jobs:
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
+          # 不缓存根 target（根目录无 Cargo.toml，缓存无效且会污染）
+          # 各 crate 的 target 由 cargo 自身增量编译管理，跨 run 缓存收益小且易冲突
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
             apps/desktop/src-tauri/target
             packages/cli/target
+            packages/shared/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
@@ -84,3 +85,30 @@ jobs:
           cargo test --manifest-path packages/shared/Cargo.toml --locked
           cargo test --manifest-path packages/cli/Cargo.toml --locked
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+      - name: Rust fmt check
+        shell: bash
+        run: |
+          cargo fmt --manifest-path packages/shared/Cargo.toml -- --check
+          cargo fmt --manifest-path packages/cli/Cargo.toml -- --check
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Rust clippy
+        shell: bash
+        run: |
+          cargo clippy --manifest-path packages/shared/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path packages/cli/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Cargo audit (RustSec advisories)
+        shell: bash
+        # 项目根目录无 Cargo.toml/Cargo.lock，3 个 crate 各自维护独立 lockfile。
+        # 分别对每个 lockfile 运行 audit，确保所有依赖树均无已知漏洞。
+        # 不使用 --deny warnings：Tauri 2 在 Windows 上的间接依赖（gtk-rs / glib /
+        # unic-* / proc-macro-error）存在 unmaintained/unsound 告警，这些属于上游
+        # 维护状态，项目层面无法修复；保留对真正 vulnerability 的失败检查即可。
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --file packages/shared/Cargo.lock
+          cargo audit --file packages/cli/Cargo.lock
+          cargo audit --file apps/desktop/src-tauri/Cargo.lock

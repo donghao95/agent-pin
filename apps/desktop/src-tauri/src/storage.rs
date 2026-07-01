@@ -96,9 +96,7 @@ fn home_dir() -> Option<PathBuf> {
 pub fn data_dir() -> PathBuf {
     home_dir()
         .unwrap_or_else(|| {
-            eprintln!(
-                "[agent-pin] HOME/USERPROFILE not set, falling back to current directory"
-            );
+            eprintln!("[agent-pin] HOME/USERPROFILE not set, falling back to current directory");
             PathBuf::from(".")
         })
         .join(".agent-pin")
@@ -116,17 +114,35 @@ pub fn pin_file_path(pin_id: &str) -> PathBuf {
     pins_dir().join(format!("{}.json", pin_id))
 }
 
-/// 校验 pin_id 格式，防路径穿越（M1）。
+/// 校验 pin_id 格式，防路径穿越和保留 label 滥用（m2）。
 /// pin_id 由 generate_pin_id 生成，格式为 pin_<timestamp>_<6位随机>。
-/// 这里做防御性校验：拒绝空字符串、包含路径分隔符或 `..` 的输入，
-/// 避免 pin_id = "../state" 等导致删除/读取非目标文件。
-/// 同时拒绝 NUL 字节（%00 解码后），避免文件名截断风险。
+/// 这里做防御性校验：
+/// - 拒绝空字符串、包含路径分隔符或 `..` 的输入（防路径穿越）
+/// - 拒绝 NUL 字节（%00 解码后），避免文件名截断风险
+/// - 拒绝超长 pin_id（防 HashMap 内存膨胀）
+/// - 拒绝保留 label "manager"（防止通过 Tauri invoke 销毁管理窗口）
 pub fn validate_pin_id(pin_id: &str) -> Result<(), String> {
     if pin_id.is_empty() {
         return Err("pin_id must be non-empty".to_string());
     }
-    if pin_id.contains('/') || pin_id.contains('\\') || pin_id.contains("..") || pin_id.contains('\0') {
-        return Err(format!("invalid pin_id (path traversal detected): {}", pin_id));
+    if pin_id.len() > 128 {
+        return Err(format!(
+            "pin_id too long (max 128 chars): {} chars",
+            pin_id.len()
+        ));
+    }
+    if pin_id.contains('/')
+        || pin_id.contains('\\')
+        || pin_id.contains("..")
+        || pin_id.contains('\0')
+    {
+        return Err(format!(
+            "invalid pin_id (path traversal detected): {}",
+            pin_id
+        ));
+    }
+    if pin_id == "manager" {
+        return Err("pin_id 'manager' is reserved and cannot be used".to_string());
     }
     Ok(())
 }
@@ -172,7 +188,7 @@ pub fn load_state() -> StateFile {
     }
 }
 
-/// 保存 state.json（原子写：先写 .tmp，再 rename）。
+/// 保存 state.json（原子写：先写 .tmp，fsync，再 rename）。
 /// 失败时 eprintln 并返回 Err，调用方决定是否重试或降级。
 pub fn save_state(state: &StateFile) -> std::io::Result<()> {
     let path = state_file_path();
@@ -180,25 +196,24 @@ pub fn save_state(state: &StateFile) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let s = serde_json::to_string_pretty(state)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    fs::write(&tmp, s)?;
+    let s = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
+    // 原子写：write + fsync + rename，确保数据落盘后再替换
+    write_and_sync(&tmp, &s)?;
     fs::rename(&tmp, &path)?;
     Ok(())
 }
 
 // ---------- pins/{pinId}.json I/O ----------
 
-/// 保存单个 Pin 的 PinDocument 到 pins/{pinId}.json（原子写）。
+/// 保存单个 Pin 的 PinDocument 到 pins/{pinId}.json（原子写 + fsync）。
 pub fn save_pin_doc(pin_id: &str, doc: &PinDocument) -> std::io::Result<()> {
     let path = pin_file_path(pin_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let s = serde_json::to_string_pretty(doc)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    fs::write(&tmp, s)?;
+    let s = serde_json::to_string_pretty(doc).map_err(std::io::Error::other)?;
+    write_and_sync(&tmp, &s)?;
     fs::rename(&tmp, &path)?;
     Ok(())
 }
@@ -241,4 +256,80 @@ pub fn delete_pin_doc(pin_id: &str) -> std::io::Result<()> {
         fs::remove_file(&path)?;
     }
     Ok(())
+}
+
+/// 写入文件并 fsync，确保数据落盘后再原子 rename。
+/// fsync 保证文件内容（不只是元数据）写入存储设备，
+/// 避免崩溃后 rename 完成但内容为空的部分写场景。
+fn write_and_sync(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(content.as_bytes())?;
+    f.sync_all()?;
+    Ok(())
+}
+
+// ---------- 测试 ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_pin_id_valid() {
+        // 标准 pin_id 格式
+        assert!(validate_pin_id("pin_1234567890_000001").is_ok());
+        assert!(validate_pin_id("pin_0_999999").is_ok());
+        // 普通的字母数字组合（不要求严格格式，只防路径穿越）
+        assert!(validate_pin_id("abc123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_pin_id_empty() {
+        assert!(validate_pin_id("").is_err());
+    }
+
+    #[test]
+    fn test_validate_pin_id_path_traversal() {
+        // 正斜杠
+        assert!(validate_pin_id("pin_123/sub").is_err());
+        // 反斜杠
+        assert!(validate_pin_id("pin_123\\sub").is_err());
+        // .. 穿越
+        assert!(validate_pin_id("..").is_err());
+        assert!(validate_pin_id("pin_../../state").is_err());
+        // NUL 字节（防 %00 截断）
+        assert!(validate_pin_id("pin_123\0evil").is_err());
+    }
+
+    #[test]
+    fn test_validate_pin_id_too_long() {
+        let long_id = "a".repeat(129);
+        assert!(validate_pin_id(&long_id).is_err());
+    }
+
+    #[test]
+    fn test_validate_pin_id_manager_reserved() {
+        assert!(validate_pin_id("manager").is_err());
+    }
+
+    #[test]
+    fn test_validate_pin_id_at_length_limit() {
+        let id = "a".repeat(128);
+        assert!(validate_pin_id(&id).is_ok());
+    }
+
+    #[test]
+    fn test_pin_file_path_construction() {
+        let path = pin_file_path("pin_123_000001");
+        assert!(path.to_string_lossy().ends_with("pin_123_000001.json"));
+        assert!(path.to_string_lossy().contains("pins"));
+    }
+
+    #[test]
+    fn test_state_file_default() {
+        let state = StateFile::default();
+        assert_eq!(state.version, 1);
+        assert!(state.pins.is_empty());
+    }
 }
