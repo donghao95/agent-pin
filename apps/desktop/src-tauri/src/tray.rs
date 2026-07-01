@@ -7,7 +7,10 @@
 // 4. 检查更新（调 GitHub API，有新版打开浏览器）
 // 5. 退出 Agent Pin
 //
-// 菜单动态刷新：Pin 状态变化时（show/hide/delete/create）调用方调 refresh()。
+// 菜单刷新机制：
+// registry 在 insert/set_state/remove 成功后 emit "pins:changed" 事件，
+// tray 在 build 时 listen 该事件，收到后自动调 refresh 重建菜单。
+// 调用方（HTTP handler / invoke command / 菜单点击）不再需要手动调 tray::refresh。
 // Tauri 2 没提供"菜单即将显示时重建"的回调，所以必须主动 set_menu。
 //
 // 契约来源：docs/phase-plan.md Phase 2-B、docs/mvp-spec.md §13
@@ -17,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Listener, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::DialogExt;
 
@@ -39,6 +42,9 @@ const MENU_CHECK_UPDATE: &str = "check_update";
 static UPDATE_CHECK_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// 构建系统托盘。在 Tauri setup hook中调用。
+///
+/// 同时注册 listen "pins:changed" 事件：registry 在 Pin 状态变更后 emit 该事件，
+/// tray 收到后自动 refresh 重建菜单。监听器存活到应用退出（Tauri 2 listen 语义）。
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app)?;
     let _tray = TrayIconBuilder::with_id(TRAY_ID)
@@ -54,6 +60,14 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             handle_tray_icon_event(tray.app_handle(), event);
         })
         .build(app)?;
+
+    // 注册 pins:changed 事件监听：Pin 状态变更后自动刷新托盘菜单。
+    // Tauri 2 的 listen 返回 EventId（u32），监听器存活到应用退出，无需保持 guard。
+    let app_for_listen = app.clone();
+    app.listen("pins:changed", move |_| {
+        refresh(&app_for_listen);
+    });
+
     Ok(())
 }
 
@@ -80,7 +94,12 @@ fn handle_tray_icon_event(app: &AppHandle, event: TrayIconEvent) {
 }
 
 /// 刷新托盘菜单（重建 + set_menu）。
-/// 在 Pin 状态变化后调用：create / show / hide / hide-all / delete。
+///
+/// 调用时机：
+/// - 自动：registry emit "pins:changed" → tray listen → refresh（主路径）
+/// - 手动：检查更新完成后（更新托盘 label 显示版本号），见 handle_check_update
+///
+/// 不再在此 emit 事件：事件由 registry 统一 emit，tray 是订阅者而非广播者。
 pub fn refresh(app: &AppHandle) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         eprintln!("[agent-pin] tray refresh: tray {} not found", TRAY_ID);
@@ -168,6 +187,8 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         "hide_all" => {
             // M10 修复：复用 pin_actions::hide_all_visible，消除三份拷贝
+            // 不需要手动 refresh：hide_all_visible 内部调 set_state，
+            // registry emit "pins:changed" → tray listen → 自动 refresh
             let failed = crate::pin_actions::hide_all_visible(app);
             if !failed.is_empty() {
                 eprintln!(
@@ -176,18 +197,18 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                     failed.join(", ")
                 );
             }
-            refresh(app);
         }
         MENU_CHECK_UPDATE => {
             handle_check_update(app);
         }
         _ => {
             // 假设是 pinId（最近 5 快恢入口）
+            // 不需要手动 refresh：show_pin 内部调 set_state，
+            // registry emit "pins:changed" → tray listen → 自动 refresh
             if id.starts_with("pin_") {
                 if let Err(e) = crate::pin_actions::show_pin(app, id, ShowPinMode::Sync) {
                     eprintln!("[agent-pin] tray show pin {}: {}", id, e);
                 }
-                refresh(app);
             }
             // 未知 id：忽略，不 panic
         }

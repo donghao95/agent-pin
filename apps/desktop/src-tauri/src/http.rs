@@ -139,6 +139,8 @@ async fn create_pin(
         ));
     }
 
+    // 5. pins:changed 事件由 registry::insert 内部 emit，管理界面和托盘自动刷新
+
     Ok(Json(json!({ "ok": true, "pinId": pin_id })))
 }
 
@@ -214,8 +216,7 @@ async fn hide_pin(
         ));
     }
 
-    // 5. 刷新托盘菜单（该 Pin 进入 hidden 快恢列表）
-    crate::tray::refresh(&app);
+    // 5. tray 刷新由 set_state(Hidden) 触发 registry emit "pins:changed" → tray listen 自动处理
 
     Ok(Json(json!({ "ok": true })))
 }

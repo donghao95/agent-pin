@@ -151,16 +151,18 @@ Desktop 校验 PinDocument（持久化由 Phase 2-B 已实现）
 
 ### Phase 2-B：入口与状态更新职责
 
-Phase 2-B 有三套入口触发 Pin 状态变更，它们的状态更新和托盘刷新职责如下：
+Phase 2-B 有三套入口触发 Pin 状态变更，它们的状态更新和事件广播职责如下：
 
-| 入口 | 状态更新 | 托盘刷新 | 说明 |
+状态变更后由 `registry` 统一 emit `pins:changed` 事件，托盘和管理界面各自 `listen` 该事件自动刷新，调用方不再需要手动调 `tray::refresh`。这是发布订阅模式：registry 是事件源，视图是订阅者。
+
+| 入口 | 状态更新 | 事件广播 | 说明 |
 |------|---------|---------|------|
-| HTTP `/api/pins/{pinId}/show` | `set_state(visible)`，失败则回滚 destroy 窗口 | `tray::refresh` | HTTP 是 Agent 的核心入口 |
-| HTTP `/api/pins/{pinId}/hide` | `set_state(hidden)` | `tray::refresh` | |
-| HTTP `/api/pins/hide-all` | 遍历 visible 逐个 `set_state(hidden)` | `tray::refresh` | |
-| invoke `show_pin` / `hide_pin` / `hide_all_pins` / `delete_pin` | 同 HTTP 对应路由 | `tray::refresh` | 管理界面按钮触发 |
-| 托盘快恢菜单点击 | `show_pin_by_id` 内 `set_state(visible)`，失败回滚 | 调用方 `refresh` | |
-| 窗口关闭按钮 → `WindowEvent::Destroyed` | `on_window_event` 检测到后 `set_state(hidden)` | `tray::refresh` | 只在 state==visible 时更新，避免与 HTTP hide 重复 |
+| HTTP `/api/pins/{pinId}/show` | `set_state(visible)`，失败则回滚 destroy 窗口 | registry emit `pins:changed` | HTTP 是 Agent 的核心入口 |
+| HTTP `/api/pins/{pinId}/hide` | `set_state(hidden)` | registry emit `pins:changed` | |
+| HTTP `/api/pins/hide-all` | 遍历 visible 逐个 `set_state_quiet(hidden)`，循环结束统一 emit 一次 | registry emit `pins:changed` ×1 | 批量用 quiet 避免 N 次托盘重建 |
+| invoke `show_pin` / `hide_pin` / `hide_all_pins` / `delete_pin` | 同 HTTP 对应路由 | 同 HTTP 对应路由 | 管理界面按钮触发 |
+| 托盘快恢菜单点击 | `show_pin_by_id` 内 `set_state(visible)`，失败回滚 | registry emit `pins:changed` | |
+| 窗口关闭按钮 → `WindowEvent::Destroyed` | `on_window_event` 检测到后 `set_state(hidden)` | registry emit `pins:changed` | 只在 state==visible 时更新，避免与 HTTP hide 重复 |
 
 关键约束：`window.rs create_pin_window` 要求 label（pinId）不冲突。所有 show 入口在调 `create_pin_window` 前必须先调 `hide_pin_window` 清理可能的孤儿窗口。
 
@@ -178,7 +180,10 @@ lib.rs on_window_event 检测到 Destroyed：
   ↓
 state.json 更新 state=hidden, updatedAt=now
   ↓
-托盘 refresh() 重建菜单（该 Pin 进入最近 5 hidden 列表）
+registry emit `pins:changed`
+  ↓
+托盘 listen 收到事件 → refresh() 重建菜单（该 Pin 进入最近 5 hidden 列表）
+管理界面 listen 收到事件 → 刷新列表
   ↓
 管理界面仍保留记录
 ```
@@ -194,7 +199,9 @@ registry.get(pinId) 从内存读 PinDocument（启动时已 load_from_disk）
   ↓
 create_pin_window 重新创建窗口
   ↓
-set_state(visible), 托盘 refresh()
+set_state(visible) → registry emit `pins:changed`
+  ↓
+托盘/管理界面 listen 收到事件自动刷新
 ```
 
 ### Phase 2-B：删除 Pin
@@ -208,11 +215,48 @@ registry.remove(pinId)：
   - 删 pins/{pinId}.json 文件
   - 从内存 registry 移除
   - 更新 state.json
+  - registry emit `pins:changed`
   ↓
-管理界面 refresh()
+托盘/管理界面 listen 收到事件自动刷新
 ```
 
 删除不可恢复，与 hide（可恢复）是两套独立路径。
+
+### Phase 2-B：事件机制（发布订阅）
+
+Pin 状态变更后需要通知所有视图（托盘菜单、管理界面列表）刷新。采用发布订阅模式：`registry` 是事件源，视图是订阅者，解耦状态管理与视图刷新。
+
+设计理由：旧设计由各调用点手动调 `tray::refresh()`，容易遗漏（`create_pin` 就漏过），且 `tray::refresh` 职责过载（既管托盘菜单，又被当作状态广播入口）。新设计由 registry 在状态变更成功后统一 emit 事件，调用方不再需要手动刷新视图。
+
+#### 事件列表
+
+| 事件名 | 载荷 | 触发时机 | 订阅者 |
+|--------|------|---------|--------|
+| `pins:changed` | `()`（无载荷） | registry `insert` / `set_state` / `remove` 成功后 | 托盘（refresh 重建菜单）、管理界面（refresh 刷新列表） |
+| `pin:show-failed` | `{ pinId: string, message: string }` | `show_pin` AsyncCreate 模式下窗口异步创建失败时 | 管理界面（显示错误 + refresh） |
+
+#### registry 事件 API
+
+- `emit_changed()`：模块级公开函数，emit `pins:changed`。供批量操作调用。
+- `set_state()`：更新状态 + 自动 emit。
+- `set_state_quiet()`：更新状态不 emit。供批量操作循环内使用，循环结束后调用方统一 `emit_changed()` 一次。
+- `insert()` / `remove()`：内部成功后自动 emit。
+
+#### 批量操作 emit 策略
+
+`hide_all_visible` 遍历所有 visible Pin 逐个 `set_state_quiet(Hidden)`，循环结束后统一调用 `emit_changed()` 一次。避免 N 次 emit 触发 N 次同步托盘菜单重建（Tauri 2 emit 是同步派发）。
+
+#### 死锁防护
+
+registry 的 `insert` / `set_state_inner` / `remove` 在 emit 前必须 `drop(inner)` 释放 Mutex 锁。原因：Tauri 2 的 `emit` 是同步派发，订阅者的 handler（如 `tray::refresh`）会尝试 `REGISTRY.list()` 加锁，若 emit 时持锁会死锁。
+
+#### 启动时序
+
+`set_app_handle()` 必须在 `load_from_disk()` 之前调用（lib.rs setup 第一步）。原因：`load_from_disk` 不 emit 事件（启动时无订阅者），但后续的 `insert`/`set_state`/`remove` 需要 AppHandle 来 emit。若 `set_app_handle` 在 `load_from_disk` 之后，`load_from_disk` 内部若有未来改动触发 emit，APP_HANDLE 为 None 会静默跳过。
+
+#### 管理界面 debounce
+
+Manager.tsx 对 `pins:changed` 监听加 50ms debounce：50ms 内多次 emit 只 refresh 一次。防御批量操作或短时间内多个状态变更（如连续创建多个 Pin）触发多次列表刷新。
 
 ---
 
