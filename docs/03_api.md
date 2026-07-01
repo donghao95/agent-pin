@@ -322,8 +322,10 @@ POST /api/pins/hide-all
 ```json
 {
   "ok": false,
-  "code": "INTERNAL_ERROR",
-  "message": "some pins could not be hidden: pin_xxx, pin_yyy"
+  "error": {
+    "code": "INTERNAL_ERROR",
+    "message": "some pins could not be hidden: pin_xxx, pin_yyy"
+  }
 }
 ```
 

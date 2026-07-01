@@ -53,6 +53,7 @@ Phase 1 托盘边界：只表示应用存活 + `Quit Agent Pin`，不做 Pin 历
 
 - `http.rs` — axum HTTP 服务，监听 `127.0.0.1:4317`
 - `pin.rs` — PinDocument 数据模型（依赖 packages/shared）
+- `pin_actions.rs` — Pin 操作编排（show / hide_all_visible），协调窗口创建/销毁与状态更新
 - `registry.rs` — 内存 Pin 注册表，pinId 为键
 - `storage.rs` — 持久化层（`~/.agent-pin/pins/` + `state.json`）
 - `tray.rs` — 系统托盘菜单 + 事件处理
