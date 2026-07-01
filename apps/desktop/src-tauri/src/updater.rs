@@ -111,6 +111,18 @@ pub fn check(force: bool) -> Result<UpdateCheckResult, String> {
 
     // 2. 请求 GitHub API
     let release = fetch_latest_release()?;
+    let Some(release) = release else {
+        // 仓库尚无 release（如 v0.1 发版前）：当前版本即最新，不写缓存。
+        // 不报错——这是正常的"无可用更新"状态，启动检查静默通过，
+        // 手动检查提示"已是最新版本"。
+        return Ok(UpdateCheckResult {
+            has_update: false,
+            current_version: current_norm.to_string(),
+            latest_version: current_norm.to_string(),
+            release_url: REPO_URL.to_string(),
+            from_cache: false,
+        });
+    };
     let latest_tag = release.tag_name;
     let latest_norm = strip_v(&latest_tag).to_string();
 
@@ -145,7 +157,12 @@ pub fn cached_latest_version() -> Option<String> {
 // ---------- 内部函数 ----------
 
 /// 请求 GitHub API 获取最新 release。
-fn fetch_latest_release() -> Result<GithubRelease, String> {
+///
+/// 返回值：
+/// - `Ok(Some(release))` - 有 release，解析成功
+/// - `Ok(None)` - 仓库尚无 release（GitHub API 返回 404），不是错误
+/// - `Err(e)` - 网络错误、5xx、解析失败等
+fn fetch_latest_release() -> Result<Option<GithubRelease>, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .build();
@@ -154,10 +171,17 @@ fn fetch_latest_release() -> Result<GithubRelease, String> {
         // GitHub API 要求 User-Agent，否则 403
         .set("User-Agent", "agent-pin-updater")
         .set("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| format!("github api request: {}", e))?;
-    resp.into_json::<GithubRelease>()
-        .map_err(|e| format!("github api parse: {}", e))
+        .call();
+
+    match resp {
+        Ok(r) => r
+            .into_json::<GithubRelease>()
+            .map(Some)
+            .map_err(|e| format!("github api parse: {}", e)),
+        // 404 表示仓库尚无 release（如 v0.1 发版前），不是错误
+        Err(ureq::Error::Status(404, _)) => Ok(None),
+        Err(e) => Err(format!("github api request: {}", e)),
+    }
 }
 
 /// 读缓存文件。文件不存在或解析失败返回 None（不阻塞）。

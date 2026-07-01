@@ -46,6 +46,22 @@ export default function Manager() {
     };
   }, [refresh]);
 
+  // 监听后端 pins:changed 事件：HTTP/CLI 创建 Pin 或状态变化时自动刷新列表。
+  // 后端在 create_pin / show / hide / hide-all / delete / 窗口关闭 等状态变更后 emit 此事件。
+  // silent=true 避免刷新按钮闪烁。
+  // 50ms debounce：防御批量操作（如 hide_all）短时间内多次 emit，避免 N 次列表刷新。
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unlistenPromise = listen("pins:changed", () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => refresh(true), 50);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      unlistenPromise.then((fn) => fn()).catch(() => {});
+    };
+  }, [refresh]);
+
   const handleShow = async (pinId: string) => {
     setBusyPinIds((prev) => new Set(prev).add(pinId));
     try {

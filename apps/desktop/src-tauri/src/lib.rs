@@ -80,7 +80,7 @@ fn hide_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
     // M2 修复：窗口销毁失败不静默吞掉，直接返回 Err
     window::hide_pin_window(&app, &pin_id)?;
     registry::REGISTRY.set_state(&pin_id, PinState::Hidden)?;
-    tray::refresh(&app);
+    // tray 刷新由 set_state 触发 registry emit "pins:changed" → tray listen 自动处理
     Ok(())
 }
 
@@ -116,7 +116,7 @@ fn delete_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
     window::hide_pin_window(&app, &pin_id)?;
     // 3. 删除 registry entry + 文件 + state
     registry::REGISTRY.remove(&pin_id)?;
-    tray::refresh(&app);
+    // tray 刷新由 remove 触发 registry emit "pins:changed" → tray listen 自动处理
     Ok(())
 }
 
@@ -163,7 +163,11 @@ pub fn run() {
             }
         }))
         .setup(|app| {
-            // 1. 初始化数据目录 + 加载历史 Pin
+            // 1. 注入 AppHandle 到 registry（必须在 load_from_disk 之前，
+            //    确保 registry 后续 insert/set_state/remove 能 emit 事件）
+            registry::set_app_handle(app.handle().clone());
+
+            // 2. 初始化数据目录 + 加载历史 Pin
             //    init 失败不阻塞启动：持久化失败时仍可创建 Pin（只是不持久化）
             if let Err(e) = storage::init() {
                 eprintln!(
@@ -173,7 +177,7 @@ pub fn run() {
             }
             registry::REGISTRY.load_from_disk();
 
-            // 2. 同步绑定 HTTP 端口 + spawn HTTP server
+            // 3. 同步绑定 HTTP 端口 + spawn HTTP server
             //    bind 在 setup hook 中同步执行，失败时直接弹窗 + 退出（与 tray build 失败一致）。
             //    不用 channel 是因为 setup hook 不能 await，同步 bind + 把 listener 传给
             //    async task 最简单可靠。bind 成功后 listener 已占用端口，不会出现"端口被抢"的窗口期。
@@ -204,7 +208,7 @@ pub fn run() {
                 http::start_http(app_handle, std_listener).await;
             });
 
-            // 3. 系统托盘（委托 tray 模块）
+            // 4. 系统托盘（委托 tray 模块）
             //    托盘是 MVP 核心 UI 入口（无主窗口，用户靠托盘退出），构建失败必须弹窗 + 退出。
             //    不返回 Err 避免 Tauri panic；用 dialog show 回调中 app.exit(1)，对话框关闭后退出。
             if let Err(e) = tray::build(app.handle()) {
@@ -234,14 +238,13 @@ pub fn run() {
 
             // 5. 启动时静默检查更新（异步、不阻塞、失败忽略）
             //    缓存命中（24h 内）时不会实际请求 GitHub API。
-            //    有新版本时刷新托盘，让"检查更新"菜单项显示最新版本提示。
+            //    无论是否有新版本都刷新托盘：缓存可能已更新（has_update=false 时也写缓存），
+            //    托盘菜单应反映最新检查结果。检查失败时不刷新（无新信息）。
             let app_handle_for_update = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 match tauri::async_runtime::spawn_blocking(|| updater::check(false)).await {
-                    Ok(Ok(result)) => {
-                        if result.has_update {
-                            tray::refresh(&app_handle_for_update);
-                        }
+                    Ok(Ok(_result)) => {
+                        tray::refresh(&app_handle_for_update);
                     }
                     Ok(Err(e)) => eprintln!("[agent-pin] startup update check: {}", e),
                     Err(e) => eprintln!("[agent-pin] startup update check join: {}", e),
@@ -318,8 +321,7 @@ pub fn run() {
                                 );
                             }
                         }
-                        // 状态变化，刷新托盘菜单
-                        tray::refresh(window.app_handle());
+                        // tray 刷新由 set_state 触发 registry emit "pins:changed" → tray listen 自动处理
                     }
                 }
                 // entry 不存在（已被 delete_pin remove）：忽略

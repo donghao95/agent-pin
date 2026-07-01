@@ -55,7 +55,7 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                     crate::registry::REGISTRY
                         .set_state(pin_id, PinState::Visible)
                         .map_err(ShowPinError::Internal)?;
-                    crate::tray::refresh(app);
+                    // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
                 }
                 return Ok(());
             }
@@ -108,7 +108,7 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                 }
                 return Err(ShowPinError::Internal(e));
             }
-            crate::tray::refresh(app);
+            // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
         }
         ShowPinMode::AsyncCreate => {
             // C2 说明：此处先设 state=Visible 再异步创建窗口，存在短暂"state=Visible 但窗口不存在"
@@ -122,7 +122,7 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
             crate::registry::REGISTRY
                 .set_state(pin_id, PinState::Visible)
                 .map_err(ShowPinError::Internal)?;
-            crate::tray::refresh(app);
+            // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
 
             let app = app.clone();
             let pin_id = pin_id.to_string();
@@ -142,7 +142,7 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
 
                 if let Err(e) = crate::window::create_pin_window(&app, &pin_id, &doc) {
                     if app.get_webview_window(&pin_id).is_some() && is_still_visible(&pin_id) {
-                        crate::tray::refresh(&app);
+                        // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
                         return;
                     }
 
@@ -157,11 +157,11 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                     }
                     // m3：AsyncCreate 模式下 show_pin 已立即返回 Ok，
                     // 窗口异步创建失败时通过事件通知前端（Manager.tsx 监听）。
+                    // tray 刷新由 set_state(Hidden) 触发 registry emit 自动处理
                     let _ = app.emit(
                         "pin:show-failed",
                         serde_json::json!({ "pinId": pin_id, "message": e }),
                     );
-                    crate::tray::refresh(&app);
                     return;
                 }
 
@@ -179,7 +179,7 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                         );
                     }
                 }
-                crate::tray::refresh(&app);
+                // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
             });
         }
     }
@@ -189,8 +189,11 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
 
 /// 隐藏所有可见 Pin（共享逻辑，供 HTTP handler、Tauri command、托盘菜单复用）。
 /// M10 修复：消除 tray.rs / lib.rs / http.rs 三份拷贝。
-/// 行为：遍历所有 visible Pin，销毁窗口 + set_state(Hidden)，逐个记录失败但继续执行。
+/// 行为：遍历所有 visible Pin，销毁窗口 + set_state_quiet(Hidden)，逐个记录失败但继续执行。
 /// 返回值：失败的 pin_id 列表（空表示全部成功）。
+///
+/// 批量 emit 策略：循环内用 set_state_quiet 避免 N 次 emit 触发 N 次同步托盘菜单重建，
+/// 循环结束后统一调用 emit_changed 一次，所有订阅者（托盘、管理界面）只刷新一次。
 pub fn hide_all_visible(app: &AppHandle) -> Vec<String> {
     let metas = crate::registry::REGISTRY.list();
     let mut failed = Vec::new();
@@ -205,12 +208,14 @@ pub fn hide_all_visible(app: &AppHandle) -> Vec<String> {
             failed.push(pin_id.clone());
             continue;
         }
-        if let Err(e) = crate::registry::REGISTRY.set_state(pin_id, PinState::Hidden) {
+        // set_state_quiet：不 emit，避免循环内 N 次托盘重建
+        if let Err(e) = crate::registry::REGISTRY.set_state_quiet(pin_id, PinState::Hidden) {
             eprintln!("[agent-pin] hide_all set_state for {}: {}", pin_id, e);
             failed.push(pin_id.clone());
         }
     }
-    crate::tray::refresh(app);
+    // 批量操作结束，统一 emit 一次，托盘和管理界面只刷新一次
+    crate::registry::emit_changed();
     failed
 }
 

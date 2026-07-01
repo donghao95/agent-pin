@@ -22,10 +22,54 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
+use tauri::{AppHandle, Emitter};
 
 use crate::pin::PinDocument;
 use crate::storage::{self, PinMeta, PinState, StateFile};
+
+// ---------- AppHandle 持有 + 事件广播 ----------
+//
+// 设计理由：
+// registry 是 Pin 状态变更的唯一入口（insert/set_state/remove）。
+// 状态变更后需要通知所有视图（托盘菜单、管理界面列表）刷新。
+// 旧设计由各调用点手动调 tray::refresh()，容易遗漏（create_pin 就漏了），
+// 且 tray::refresh 职责过载（既管托盘菜单，又被当作状态广播入口）。
+//
+// 新设计：registry 持有 AppHandle，在状态变更成功后统一 emit "pins:changed" 事件。
+// 托盘和管理界面各自 listen 该事件自动刷新，调用方不再需要手动调 tray::refresh。
+// 这是发布订阅模式：状态变更是事件源，视图是订阅者，解耦状态管理与视图刷新。
+
+/// 应用启动时注入的 AppHandle，用于 emit 事件。
+/// 在 lib.rs setup 中 load_from_disk 之前 set。
+static APP_HANDLE: OnceCell<AppHandle> = OnceCell::new();
+
+/// 注入 AppHandle。只能在启动时调用一次。
+/// 重复调用时打日志而非静默忽略，便于发现启动流程异常。
+pub fn set_app_handle(app: AppHandle) {
+    if APP_HANDLE.set(app).is_err() {
+        eprintln!("[agent-pin] set_app_handle called more than once, ignoring");
+    }
+}
+
+/// 广播 pins:changed 事件，通知所有订阅者（托盘、管理界面）刷新。
+/// 在 insert/set_state/remove 成功后调用。
+///
+/// load_from_disk 不调用 emit_changed，原因有二：
+/// 1. 代码层面：load_from_disk 直接操作 inner HashMap（直接修改 meta.state），
+///    不经过 set_state/insert/remove，所以不会触发 emit。
+/// 2. 业务层面：启动时托盘尚未 build、管理界面尚未打开，无订阅者，emit 无意义。
+///
+/// 公开是为了支持批量操作（如 hide_all_visible）：批量操作在循环内用
+/// set_state_quiet 避免每次都 emit，循环结束后由调用方统一调用 emit_changed 一次，
+/// 避免 N 次 emit 触发 N 次同步托盘菜单重建。
+pub fn emit_changed() {
+    if let Some(app) = APP_HANDLE.get() {
+        if let Err(e) = app.emit("pins:changed", ()) {
+            eprintln!("[agent-pin] registry emit pins:changed: {}", e);
+        }
+    }
+}
 
 // ---------- PinEntry ----------
 
@@ -90,6 +134,8 @@ impl PinRegistry {
             return Err(format!("failed to save state.json: {}", e));
         }
 
+        drop(inner); // 显式释放锁后再 emit，避免事件 handler 尝试加锁导致死锁
+        emit_changed();
         Ok(meta)
     }
 
@@ -120,6 +166,21 @@ impl PinRegistry {
     /// 回滚理由：若持久化失败但保留内存变更，调用方收到 Err 后无法判断内存状态，
     /// 且重启后磁盘恢复旧状态会造成内存/磁盘长期不一致。回滚保证 set_state 全成功或全失败。
     pub fn set_state(&self, pin_id: &str, state: PinState) -> Result<(), String> {
+        self.set_state_inner(pin_id, state)?;
+        emit_changed();
+        Ok(())
+    }
+
+    /// 静默更新状态：与 set_state 逻辑一致，但不 emit pins:changed 事件。
+    /// 供批量操作（如 hide_all_visible）使用：循环内用 quiet 版本避免 N 次 emit
+    /// 触发 N 次同步托盘菜单重建，循环结束后由调用方统一调用 emit_changed 一次。
+    pub fn set_state_quiet(&self, pin_id: &str, state: PinState) -> Result<(), String> {
+        self.set_state_inner(pin_id, state)
+    }
+
+    /// set_state / set_state_quiet 的共享实现。
+    /// 持有锁更新内存状态 + 持久化 state.json（失败回滚），不 emit 事件。
+    fn set_state_inner(&self, pin_id: &str, state: PinState) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let entry = inner
             .get_mut(pin_id)
@@ -141,6 +202,7 @@ impl PinRegistry {
             }
             return Err(format!("failed to save state.json: {}", e));
         }
+        drop(inner); // 释放锁（emit 由调用方负责）
         Ok(())
     }
 
@@ -187,6 +249,7 @@ impl PinRegistry {
                 e, pin_id
             );
         }
+        emit_changed();
         Ok(())
     }
 
