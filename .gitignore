@@ -49,6 +49,7 @@ $RECYCLE.BIN/
 
 # Local planning / proposal artifacts (not part of source)
 agent-pin-proposal.html
+docs/feature/
 
 # Local debug artifacts
 /-w

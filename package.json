@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "pnpm --filter @agent-pin/desktop tauri dev",
     "build": "pnpm --filter @agent-pin/desktop tauri build",
-    "lint": "pnpm -r run lint || true",
+    "lint": "pnpm -r --if-present run lint",
     "typecheck": "pnpm -r run typecheck",
     "sync-version": "node scripts/sync-version.mjs",
     "sync-version:check": "node scripts/sync-version.mjs --check"

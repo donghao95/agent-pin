@@ -2,11 +2,12 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import Pin from "./Pin";
 import Manager from "./Manager";
-// 两个 CSS 同时加载：
-// - pin.css 用 .pin-* 类名（Pin 窗口）
-// - manager.css 用 .manager-* 和 .pin-card-* 类名（管理界面）
-// 类名互不重叠，互不影响。Vite 会把两个 CSS 打到同一个 bundle，
-// 各窗口只渲染对应组件，未使用的 CSS 规则不会被匹配，无副作用。
+// 三个 CSS 按顺序加载：
+// - index.css：全局重置（* / html / body / #root），所有窗口共用（M10）
+// - pin.css：Pin 窗口类名（.pin-*）
+// - manager.css：管理界面类名（.manager-* 和 .pin-card-*）
+// 类名互不重叠。Vite 会把 CSS 打到同一个 bundle，各窗口只渲染对应组件。
+import "./index.css";
 import "./pin.css";
 import "./manager.css";
 

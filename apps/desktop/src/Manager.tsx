@@ -25,7 +25,10 @@ export default function Manager() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
-  const [busyPinId, setBusyPinId] = useState<string | null>(null);
+  // M7：用 Set 支持多 Pin 并发操作锁，避免单值锁被覆盖
+  const [busyPinIds, setBusyPinIds] = useState<Set<string>>(new Set());
+  // M8：隐藏全部操作锁
+  const [hidingAll, setHidingAll] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -45,48 +48,63 @@ export default function Manager() {
   }, [refresh]);
 
   const handleShow = async (pinId: string) => {
-    setBusyPinId(pinId);
+    setBusyPinIds((prev) => new Set(prev).add(pinId));
     try {
       await invoke("show_pin", { pinId });
       await refresh();
     } catch (e) {
       setError(`显示失败: ${e}`);
     } finally {
-      setBusyPinId(null);
+      setBusyPinIds((prev) => {
+        const next = new Set(prev);
+        next.delete(pinId);
+        return next;
+      });
     }
   };
 
   const handleHide = async (pinId: string) => {
-    setBusyPinId(pinId);
+    setBusyPinIds((prev) => new Set(prev).add(pinId));
     try {
       await invoke("hide_pin", { pinId });
       await refresh();
     } catch (e) {
       setError(`隐藏失败: ${e}`);
     } finally {
-      setBusyPinId(null);
+      setBusyPinIds((prev) => {
+        const next = new Set(prev);
+        next.delete(pinId);
+        return next;
+      });
     }
   };
 
   const handleHideAll = async () => {
+    setHidingAll(true);
     try {
       await invoke("hide_all_pins");
       await refresh();
     } catch (e) {
       setError(`隐藏全部失败: ${e}`);
+    } finally {
+      setHidingAll(false);
     }
   };
 
   const handleDelete = async (pinId: string, title: string) => {
     if (!window.confirm(`确定删除 "${title}" 吗？\n此操作不可恢复。`)) return;
-    setBusyPinId(pinId);
+    setBusyPinIds((prev) => new Set(prev).add(pinId));
     try {
       await invoke("delete_pin", { pinId });
       await refresh();
     } catch (e) {
       setError(`删除失败: ${e}`);
     } finally {
-      setBusyPinId(null);
+      setBusyPinIds((prev) => {
+        const next = new Set(prev);
+        next.delete(pinId);
+        return next;
+      });
     }
   };
 
@@ -152,10 +170,10 @@ export default function Manager() {
           <button
             className="manager-btn"
             onClick={handleHideAll}
-            disabled={visibleCount === 0}
+            disabled={hidingAll || visibleCount === 0}
             title="隐藏所有可见 Pin"
           >
-            隐藏全部
+            {hidingAll ? "隐藏中…" : "隐藏全部"}
           </button>
           <button
             className="manager-btn manager-btn-secondary"
@@ -166,7 +184,15 @@ export default function Manager() {
           </button>
         </div>
         {error && (
-          <div className="manager-error" onClick={() => setError(null)}>
+          <div
+            className="manager-error"
+            onClick={() => setError(null)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === "Escape") setError(null);
+            }}
+          >
             {error} ×
           </div>
         )}
@@ -187,7 +213,7 @@ export default function Manager() {
               <PinCard
                 key={pin.pinId}
                 pin={pin}
-                busy={busyPinId === pin.pinId}
+                busy={busyPinIds.has(pin.pinId)}
                 onShow={() => handleShow(pin.pinId)}
                 onHide={() => handleHide(pin.pinId)}
                 onDelete={() => handleDelete(pin.pinId, pin.title)}

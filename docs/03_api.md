@@ -71,6 +71,8 @@ INTERNAL_ERROR
 
 `PIN_NOT_FOUND` 在 Phase 2-B 引入：`show` / `hide` 路由的 `{pinId}` 在 registry 中不存在时返回 404。`delete`（管理界面 invoke）同样使用此错误码。
 
+`INVALID_JSON` 也用于 POST 请求未携带 `Content-Type: application/json` 的场景（返回 415 UNSUPPORTED_MEDIA_TYPE）。这是 CSRF 防护的一部分：浏览器对非 `application/json` 的 POST 视为简单请求不发 preflight，强制 Content-Type 可阻止跨站 CSRF。
+
 ---
 
 ## 3. GET /api/health
@@ -109,6 +111,10 @@ Phase：1
 POST /api/pins
 Content-Type: application/json
 ```
+
+**Content-Type 强制要求**：所有 POST 请求必须携带 `Content-Type: application/json`（charset 可选），否则返回 415 + `INVALID_JSON`。这是 CSRF 防护的一部分，阻止浏览器跨站简单 POST。
+
+请求体大小上限：1 MB。
 
 请求体：
 

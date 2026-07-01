@@ -155,7 +155,13 @@ struct PushArgs {
 
 fn main() {
     let cli = Cli::parse();
-    let client = Client::new(cli.endpoint);
+    let client = match Client::new(cli.endpoint) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     if let Err(e) = run_command(&client, cli.command) {
         // 连接失败的错误统一格式化为友好提示（输出到 stdout，因为这是用户可见状态而非程序错误）
@@ -310,6 +316,8 @@ fn cmd_list(client: &Client) -> Result<(), String> {
 }
 
 fn cmd_show(client: &Client, pin_id: &str) -> Result<(), String> {
+    // M5：校验 pin_id 格式，防 URL 路径截断（#、?、.. 等会破坏路由）
+    validate_pin_id(pin_id)?;
     let resp = client.post(&format!("/api/pins/{}/show", pin_id), "")?;
     // 防御性校验：HTTP 2xx 但 body ok!=true 视为错误
     if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -329,6 +337,22 @@ fn cmd_hide_all(client: &Client) -> Result<(), String> {
 }
 
 // ---------- 辅助函数 ----------
+
+/// 校验 pin_id 格式（M5：防 URL 路径截断）。
+/// pin_id 由后端 generate_pin_id 生成，格式为 pin_<timestamp>_<6位随机>。
+/// 拒绝空字符串、包含路径分隔符或特殊字符的输入，避免 #、?、.. 破坏路由。
+/// 同时拒绝 NUL 字节，避免截断风险。
+fn validate_pin_id(pin_id: &str) -> Result<(), String> {
+    if pin_id.is_empty() {
+        return Err("pin_id must be non-empty".to_string());
+    }
+    if pin_id.contains('/') || pin_id.contains('\\') || pin_id.contains("..")
+        || pin_id.contains('#') || pin_id.contains('?') || pin_id.contains('\0')
+    {
+        return Err(format!("invalid pin_id: {}", pin_id));
+    }
+    Ok(())
+}
 
 /// 组装 PinDocument 并 POST /api/pins。
 fn create_pin(client: &Client, doc: &PinDocument) -> Result<(), String> {

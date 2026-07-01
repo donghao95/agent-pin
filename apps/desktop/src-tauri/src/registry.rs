@@ -109,7 +109,9 @@ impl PinRegistry {
 
     /// 更新 Pin 状态（visible ↔ hidden ↔ failed）。
     /// 同时更新 updated_at 和 state.json。
-    /// Pin 不存在时返回 Err。
+    /// Pin 不存在时返回 Err。持久化失败时返回 Err（不静默吞错，AGENTS.md）。
+    /// 注意：持久化失败时内存状态已改，但磁盘未更新，重启后从磁盘恢复旧状态。
+    /// 这是有意为之的降级策略：内存优先，磁盘 best-effort。
     pub fn set_state(&self, pin_id: &str, state: PinState) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap();
         let entry = inner
@@ -123,26 +125,39 @@ impl PinRegistry {
                 "[agent-pin] failed to save state.json after set_state: {}",
                 e
             );
+            return Err(format!("failed to save state.json: {}", e));
         }
         Ok(())
     }
 
     /// 删除 Pin（不可恢复）。
     /// 顺序：
-    ///   1. 删 pins/{pinId}.json（失败返回 Err，不修改内存）
-    ///   2. 从内存移除
-    ///   3. 写 state.json（失败 eprintln，不回滚）
+    ///   1. 校验 pin_id 格式（防路径穿越）
+    ///   2. 加锁查内存是否存在（不存在直接返回 Ok，幂等）
+    ///   3. 删 pins/{pinId}.json（失败返回 Err，不修改内存）
+    ///   4. 从内存移除
+    ///   5. 写 state.json（失败 eprintln，不回滚）
     pub fn remove(&self, pin_id: &str) -> Result<(), String> {
-        // 1. 删 doc 文件
+        // 1. 校验 pin_id 格式（防路径穿越，M1）
+        storage::validate_pin_id(pin_id)?;
+
+        // 2. 加锁查内存是否存在（幂等：不存在直接返回）
+        {
+            let inner = self.inner.lock().unwrap();
+            if !inner.contains_key(pin_id) {
+                return Ok(());
+            }
+        }
+
+        // 3. 删 doc 文件（失败返回 Err，内存不变）
         if let Err(e) = storage::delete_pin_doc(pin_id) {
             return Err(format!("failed to delete pin doc: {}", e));
         }
 
-        // 2. 从内存移除
+        // 4. 从内存移除 + 5. 写 state
         let mut inner = self.inner.lock().unwrap();
         inner.remove(pin_id);
 
-        // 3. 写 state
         if let Err(e) = persist_state_locked(&inner) {
             eprintln!(
                 "[agent-pin] failed to save state.json after remove: {}",

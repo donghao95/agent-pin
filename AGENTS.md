@@ -331,8 +331,8 @@ pnpm dev          # 启动 Tauri 开发模式（HTTP + 前端 HMR）
 pnpm build        # 构建生产包
 pnpm lint         # ESLint
 pnpm typecheck    # tsc --noEmit
-pnpm sync-version:check  # 校验 4 处版本号一致（CI 也会跑）
-pnpm sync-version        # 以 root package.json 为准同步到其余 3 处
+pnpm sync-version:check  # 校验 5 处版本号一致（CI 也会跑）
+pnpm sync-version        # 以 root package.json 为准同步到其余 4 处
 ```
 
 Rust CLI（`packages/cli/`）：

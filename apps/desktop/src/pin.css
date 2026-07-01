@@ -5,31 +5,9 @@
  *   圆角/阴影由 DWM 通过 WebviewWindowBuilder::shadow(true) 提供（Win11 有，Win10 退化直角）。
  *   元素级圆角（按钮、代码块、滚动条等）保留，不影响窗口合成。
  *   详见 docs/ui-style.md §4 Phase 1 视觉退化说明。
+ *
+ * 全局重置（* / html / body / #root）在 index.css，Manager 窗口也共用（M10）。
  */
-
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
-html,
-body,
-#root {
-  height: 100%;
-  overflow: hidden;
-}
-
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
-    "PingFang SC", sans-serif;
-  font-size: 14px;
-  color: #1f2329;
-  /* 不透明白色背景。
-     Windows WebView2 下 transparent + 圆角会露出窗口黑色底，
-     且 backdrop-filter 在缩放时会重绘抖动。Phase 1 用不透明矩形最稳定。 */
-  background: #ffffff;
-}
 
 .pin-root {
   display: flex;
