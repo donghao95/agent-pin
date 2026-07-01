@@ -192,6 +192,19 @@ export type PinSource = {
 
 PinDocument 是 API、CLI、窗口渲染之间的核心契约。修改 Pin JSON 结构时，必须同步更新：`03_api.md`、`04_cli.md`、`skills/agent-pin/SKILL.md`、`examples/pins/`。
 
+### 字段长度上限（防御性校验）
+
+`packages/shared` 的 `validate()` 会对以下字段做长度上限校验，超限返回 `INVALID_PIN_DOCUMENT`：
+
+| 字段 | 上限 | 说明 |
+| --- | --- | --- |
+| `title` | 1024 字符 | 防止标题过长导致窗口标题栏溢出 |
+| `markdown.content` | 256 KB | 单个 markdown block 内容上限 |
+| `blocks` 数量 | 50 | 单个 Pin 的 block 数量上限 |
+| `window.width` / `window.height`（数字值） | 1..=100_000 | 防止异常大值导致窗口创建失败 |
+
+HTTP 请求体总大小上限为 1 MB（`03_api.md` §4）。
+
 ## 8. Block 规则
 
 ### Markdown Block

@@ -17,11 +17,13 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
-    response::Json,
+    http::{Method, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
+use axum::extract::Request;
 use serde_json::{json, Value};
 use tauri::AppHandle;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -43,6 +45,12 @@ pub async fn start_http(app: AppHandle, std_listener: std::net::TcpListener) {
         .route("/api/pins/{pinId}/show", post(show_pin))
         .route("/api/pins/{pinId}/hide", post(hide_pin))
         .layer(RequestBodyLimitLayer::new(MAX_BODY))
+        // CSRF 防护：POST 请求必须带 Content-Type: application/json。
+        // 浏览器对 application/json 的跨站 POST 会发 preflight（OPTIONS），
+        // 我们不响应 CORS，preflight 失败 → 实际请求不会发出。
+        // text/plain 是简单请求不发 preflight，必须拒绝。
+        // CLI 的 ureq 已显式设 Content-Type: application/json，不受影响。
+        .layer(middleware::from_fn(csrf_guard))
         .with_state(app);
 
     // std listener -> tokio listener（非阻塞已在 setup hook 中设置）
@@ -209,6 +217,8 @@ async fn hide_all_pins(State(app): State<AppHandle>) -> Json<Value> {
             eprintln!("[agent-pin] hide-all set_state for {}: {}", meta.pin_id, e);
         }
     }
+    // 刷新托盘菜单（隐藏的 Pin 进入 hidden 快恢列表，与 hide_pin 路由保持一致）
+    crate::tray::refresh(&app);
     Json(json!({ "ok": true }))
 }
 
@@ -250,4 +260,30 @@ fn show_pin_err_response(message: String) -> (StatusCode, Json<Value>) {
         PinErrorCode::InternalError,
         message,
     )
+}
+
+// ---------- CSRF 防护 ----------
+
+/// POST 请求必须带 Content-Type: application/json，否则拒绝。
+/// 浏览器对 application/json 的跨站 POST 会发 preflight（OPTIONS），
+/// 我们不响应 CORS，preflight 失败 → 实际请求不会发出。
+/// text/plain 是简单请求不发 preflight，必须拒绝（防 CSRF）。
+/// CLI 的 ureq 已显式设 Content-Type: application/json，不受影响。
+async fn csrf_guard(req: Request, next: Next) -> Response {
+    if req.method() == Method::POST {
+        let ct = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !ct.starts_with("application/json") {
+            return err_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                PinErrorCode::InvalidJson,
+                "Content-Type must be application/json".to_string(),
+            )
+            .into_response();
+        }
+    }
+    next.run(req).await
 }

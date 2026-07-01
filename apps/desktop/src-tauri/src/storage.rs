@@ -116,6 +116,21 @@ pub fn pin_file_path(pin_id: &str) -> PathBuf {
     pins_dir().join(format!("{}.json", pin_id))
 }
 
+/// 校验 pin_id 格式，防路径穿越（M1）。
+/// pin_id 由 generate_pin_id 生成，格式为 pin_<timestamp>_<6位随机>。
+/// 这里做防御性校验：拒绝空字符串、包含路径分隔符或 `..` 的输入，
+/// 避免 pin_id = "../state" 等导致删除/读取非目标文件。
+/// 同时拒绝 NUL 字节（%00 解码后），避免文件名截断风险。
+pub fn validate_pin_id(pin_id: &str) -> Result<(), String> {
+    if pin_id.is_empty() {
+        return Err("pin_id must be non-empty".to_string());
+    }
+    if pin_id.contains('/') || pin_id.contains('\\') || pin_id.contains("..") || pin_id.contains('\0') {
+        return Err(format!("invalid pin_id (path traversal detected): {}", pin_id));
+    }
+    Ok(())
+}
+
 // ---------- 初始化 ----------
 
 /// 初始化数据目录（启动时调用）。

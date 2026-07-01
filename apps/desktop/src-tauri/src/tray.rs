@@ -303,26 +303,15 @@ fn handle_check_update(app: &AppHandle) {
 /// 打开 Release URL 到默认浏览器（跨平台）。
 /// 不用 tauri-plugin-shell（已废弃 open 方法，推荐 tauri-plugin-opener），
 /// 改用 std::process::Command，与 open_data_dir 一致风格，避免引入新插件。
+/// Windows 用 explorer 而非 cmd /c start，避免 shell 元字符（&|>）被解析（M4 命令注入防护）。
 fn open_release_url(_app: &AppHandle, url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let cmd = "cmd";
-    #[cfg(target_os = "windows")]
-    let args = ["/c", "start", "", url];
+    let cmd = "explorer";
     #[cfg(target_os = "macos")]
     let cmd = "open";
-    #[cfg(target_os = "macos")]
-    let args = [url];
     #[cfg(target_os = "linux")]
     let cmd = "xdg-open";
-    #[cfg(target_os = "linux")]
-    let args = [url];
 
-    #[cfg(target_os = "windows")]
-    std::process::Command::new(cmd)
-        .args(args)
-        .spawn()
-        .map_err(|e| format!("open url: {}", e))?;
-    #[cfg(not(target_os = "windows"))]
     std::process::Command::new(cmd)
         .arg(url)
         .spawn()

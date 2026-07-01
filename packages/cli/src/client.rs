@@ -23,22 +23,20 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(endpoint: Option<String>) -> Self {
+    /// 创建 Client。endpoint 校验失败返回 Err（M6：不直接 exit，让 main 统一处理）。
+    pub fn new(endpoint: Option<String>) -> Result<Self, String> {
         let endpoint = endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
         // 校验 endpoint host 必须是本地回环，避免把 Pin 内容发送到远程主机。
         // AGENTS.md：HTTP 只监听 127.0.0.1，不开放局域网。CLI 作为客户端也应限制。
-        if let Err(e) = validate_endpoint(&endpoint) {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
+        validate_endpoint(&endpoint)?;
         // 去掉尾部斜杠，避免 format!("{}{}", endpoint, path) 产生双斜杠
         let endpoint = endpoint.trim_end_matches('/').to_string();
-        Self {
+        Ok(Self {
             endpoint,
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(10))
                 .build(),
-        }
+        })
     }
 
     /// GET 请求，返回 JSON Value。
@@ -100,32 +98,36 @@ fn not_running_error(e: &ureq::Error) -> String {
     format!("__NOT_RUNNING__: {}", e)
 }
 
-/// 校验 endpoint host 必须是本地回环地址。
+/// 校验 endpoint host 必须是本地回环地址（C2 SSRF 防护）。
+/// 用 url::Url::parse 解析，正确处理 URL 规范：
+/// - 拒绝 userinfo（防 http://127.0.0.1@evil.com → host=evil.com 绕过）
+/// - 大小写不敏感匹配 host（m11：LOCALHOST 也可接受）
 /// 允许：127.0.0.1 / localhost / ::1（IPv6）
 /// 拒绝：其他任何 host，避免 Pin 内容泄露到远程主机。
 fn validate_endpoint(endpoint: &str) -> Result<(), String> {
-    let after_scheme = endpoint
-        .strip_prefix("http://")
-        .or_else(|| endpoint.strip_prefix("https://"))
-        .ok_or_else(|| {
-            format!(
-                "endpoint must start with http:// or https://: {}",
-                endpoint
-            )
-        })?;
-    // 去掉 path 部分，只保留 host:port
-    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
-    // IPv6: http://[::1]:port → host_port 是 [::1]:port
-    // IPv4: http://127.0.0.1:port → host_port 是 127.0.0.1:port
-    let host = if let Some(stripped) = host_port.strip_prefix('[') {
-        // IPv6: 取 ] 之前的部分
-        stripped.split(']').next().unwrap_or(stripped)
-    } else {
-        // IPv4/hostname: 取 : 之前的部分
-        host_port.split(':').next().unwrap_or(host_port)
-    };
+    let url = url::Url::parse(endpoint)
+        .map_err(|e| format!("invalid endpoint URL: {}", e))?;
 
-    match host {
+    // 拒绝 userinfo（防 SSRF：http://127.0.0.1@evil.com 被 CLI 误判为 host=127.0.0.1）
+    if !url.username().is_empty() {
+        return Err(format!(
+            "endpoint must not contain userinfo: {}",
+            endpoint
+        ));
+    }
+
+    // 校验 scheme
+    match url.scheme() {
+        "http" | "https" => {}
+        s => return Err(format!("endpoint scheme must be http or https: {}", s)),
+    }
+
+    // 校验 host 必须是本地回环
+    let host = url
+        .host_str()
+        .ok_or_else(|| format!("endpoint must have a host: {}", endpoint))?;
+
+    match host.to_lowercase().as_str() {
         "127.0.0.1" | "localhost" | "::1" => Ok(()),
         _ => Err(format!(
             "endpoint host '{}' is not allowed: only 127.0.0.1, localhost, ::1 are permitted (local-only)",

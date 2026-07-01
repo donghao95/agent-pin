@@ -20,7 +20,23 @@ const handleTitlebarMouseDown = (e: React.MouseEvent) => {
     });
 };
 
-// PinDocument 类型，与后端 pin.rs 对齐
+// PinDocument 类型，与后端 packages/shared/src/lib.rs 对齐（M9：补全 window/source/createdAt）
+type PinWindowConfig = {
+  width?: number;
+  // 后端 PinHeight 是 untagged enum：number | "auto"，前端类型需与之对齐（m-A4）
+  height?: number | string;
+  x?: number;
+  y?: number;
+  alwaysOnTop?: boolean;
+};
+
+type PinSource = {
+  agent?: string;
+  workspace?: string;
+  task?: string;
+  conversationId?: string;
+};
+
 type PinDocument = {
   version: number;
   title: string;
@@ -29,6 +45,9 @@ type PinDocument = {
     | { type: "image"; path: string; caption?: string }
     | { type: "status"; level?: string; text: string }
   >;
+  window?: PinWindowConfig;
+  source?: PinSource;
+  createdAt?: string;
 };
 
 // status block 的 level 类型
@@ -200,7 +219,7 @@ function ImageBlock({ path, caption }: { path: string; caption?: string }) {
         src={src}
         alt={caption ?? ""}
         onError={() => setFailed(true)}
-        loading="lazy"
+        loading="eager"
       />
       {caption && <div className="pin-image-caption">{caption}</div>}
     </div>
