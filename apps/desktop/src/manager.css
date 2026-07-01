@@ -1,6 +1,6 @@
 /* Agent Pin 管理界面样式
  *
- * 设计目标（docs/ui-style.md）：浅色、克制、像桌面工具。
+ * 设计目标（docs/05_ui_style.md）：浅色、克制、像桌面工具。
  * 管理界面用系统装饰（decorations=true），不是 Pin 窗口，可用标准 CSS 圆角/阴影。
  * Pin 窗口的 Phase 1 视觉退化（无圆角/阴影）不适用于管理界面。
  */

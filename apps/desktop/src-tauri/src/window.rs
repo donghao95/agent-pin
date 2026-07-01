@@ -12,7 +12,7 @@
 // Phase 2-B：show 路由复用 create_pin_window（从 registry 读 doc 重建窗口）。
 // 窗口位置不持久化：用户拖动后的位置丢失，show 时重新级联。
 //
-// 契约来源：docs/ui-style.md §4、docs/mvp-spec.md §12
+// 契约来源：docs/05_ui_style.md §4、docs/01_product_spec.md §12
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -80,7 +80,7 @@ pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Re
         // 解决移动/缩放时 WebView2 重绘延迟导致的黑线。
         // CSS 不再做圆角/阴影（见 pin.css），统一由 DWM 提供 OS 级圆角。
         // 平台差异：Win11 有圆角+阴影；Win10 退化为直角；macOS/Linux 行为由系统合成器决定，Phase 1 不验证。
-        // 残留问题：移动/缩放时 WebView2 重绘延迟仍可能边缘闪烁，Phase 1 接受（见 docs/ui-style.md §4）。
+        // 残留问题：移动/缩放时 WebView2 重绘延迟仍可能边缘闪烁，Phase 1 接受（见 docs/05_ui_style.md §4）。
         .shadow(true)
         .always_on_top(always_on_top)
         .resizable(true)

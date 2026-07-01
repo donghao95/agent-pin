@@ -17,7 +17,7 @@
 // - 删除 Pin = remove（删记录 + 删 pins/{pinId}.json + 更新 state.json）
 // - 启动时 load_from_disk 恢复历史
 //
-// 契约来源：docs/architecture.md §3/§5、docs/phase-plan.md Phase 2-B
+// 契约来源：docs/02_architecture.md §3/§5、docs/06_phase_plan.md Phase 2-B
 
 use std::collections::HashMap;
 use std::sync::Mutex;

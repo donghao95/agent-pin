@@ -242,7 +242,7 @@ export type PinDocument = {
 }
 ```
 
-修改 Pin JSON 结构时，必须同步更新：`docs/mvp-spec.md`、`docs/api.md`、`docs/cli.md`、`skills/agent-pin/SKILL.md`、`examples/pins/`。
+修改 Pin JSON 结构时，必须同步更新：`docs/01_product_spec.md`、`docs/03_api.md`、`docs/04_cli.md`、`skills/agent-pin/SKILL.md`、`examples/pins/`。
 
 ---
 

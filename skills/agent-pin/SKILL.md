@@ -115,7 +115,7 @@ Example `pin.json`:
     },
     {
       "type": "image",
-      "path": "C:/Users/hao/Desktop/error.png",
+      "path": "C:/Users/<username>/Desktop/error.png",
       "caption": "Error screenshot"
     }
   ]

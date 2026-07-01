@@ -187,7 +187,7 @@ function statusIcon(level: StatusLevel): string {
 }
 
 // ImageBlock：用 convertFileSrc 把绝对路径转 asset:// URL，由 Tauri asset protocol 加载。
-// 图片不存在/加载失败时显示错误块，不崩溃（docs/mvp-spec.md §9）。
+// 图片不存在/加载失败时显示错误块，不崩溃（docs/01_product_spec.md §9）。
 function ImageBlock({ path, caption }: { path: string; caption?: string }) {
   const [failed, setFailed] = useState(false);
   const src = convertFileSrc(path);

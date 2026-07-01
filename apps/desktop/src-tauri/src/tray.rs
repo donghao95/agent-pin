@@ -13,7 +13,7 @@
 // 调用方（HTTP handler / invoke command / 菜单点击）不再需要手动调 tray::refresh。
 // Tauri 2 没提供"菜单即将显示时重建"的回调，所以必须主动 set_menu。
 //
-// 契约来源：docs/phase-plan.md Phase 2-B、docs/mvp-spec.md §13
+// 契约来源：docs/06_phase_plan.md Phase 2-B、docs/01_product_spec.md §13
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

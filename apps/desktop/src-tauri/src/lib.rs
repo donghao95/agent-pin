@@ -8,7 +8,7 @@
 // 4. 系统托盘（委托 tray 模块）：Quit + 最近 5 hidden Pin 快恢 + 管理界面 + 隐藏全部
 // 5. 窗口销毁事件：state=visible 时设 hidden（关闭=hidden，不删除记录）
 //
-// 边界说明（见 docs/phase-plan.md）：
+// 边界说明（见 docs/06_phase_plan.md）：
 // - 关闭 Pin 窗口 = destroy 窗口 + state=hidden（可恢复）
 // - 删除 Pin = destroy 窗口 + 删 pins/{pinId}.json + 从 state.json 移除（不可恢复）
 // - 托盘 Quit = 退出应用 + 停止 HTTP
