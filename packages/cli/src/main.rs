@@ -494,3 +494,272 @@ fn to_absolute(path: &str) -> Result<String, String> {
         .ok_or_else(|| format!("path contains invalid UTF-8: {}", path))?;
     Ok(s.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    // 辅助：构造临时文件路径（唯一，避免测试间冲突）
+    fn temp_file(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("agent-pin-test-{}-{}", std::process::id(), name));
+        p
+    }
+
+    // 辅助：构造全 None 的 CommonArgs
+    fn empty_common() -> CommonArgs {
+        CommonArgs {
+            width: None,
+            height: None,
+            no_always_on_top: false,
+            agent: None,
+            workspace: None,
+            task: None,
+        }
+    }
+
+    // ---------- validate_pin_id ----------
+
+    #[test]
+    fn validate_pin_id_rejects_empty() {
+        assert!(validate_pin_id("").is_err());
+    }
+
+    #[test]
+    fn validate_pin_id_accepts_standard_format() {
+        assert!(validate_pin_id("pin_1700000000000_abc123").is_ok());
+    }
+
+    #[test]
+    fn validate_pin_id_accepts_alphanumeric_underscore_hyphen() {
+        assert!(validate_pin_id("pin-ABC_123-xyz").is_ok());
+        assert!(validate_pin_id("a").is_ok());
+        assert!(validate_pin_id("12345").is_ok());
+    }
+
+    #[test]
+    fn validate_pin_id_rejects_hash() {
+        // # 会截断 URL 路径，必须拒绝
+        assert!(validate_pin_id("pin_123#frag").is_err());
+    }
+
+    #[test]
+    fn validate_pin_id_rejects_question() {
+        // ? 会截断 URL 路径，必须拒绝
+        assert!(validate_pin_id("pin_123?x=1").is_err());
+    }
+
+    #[test]
+    fn validate_pin_id_rejects_slash() {
+        // / 会破坏路由，必须拒绝
+        assert!(validate_pin_id("pin_123/abc").is_err());
+        assert!(validate_pin_id("pin_123\\abc").is_err());
+    }
+
+    #[test]
+    fn validate_pin_id_rejects_dot_path_traversal() {
+        // .. 路径遍历，必须拒绝
+        assert!(validate_pin_id("../etc/passwd").is_err());
+        assert!(validate_pin_id("pin_.._abc").is_err());
+    }
+
+    #[test]
+    fn validate_pin_id_rejects_spaces_and_special() {
+        assert!(validate_pin_id("pin 123").is_err());
+        assert!(validate_pin_id("pin@123").is_err());
+        assert!(validate_pin_id("pin&123").is_err());
+    }
+
+    // ---------- to_absolute ----------
+
+    #[test]
+    fn to_absolute_returns_absolute_path_unchanged() {
+        // Windows 绝对路径
+        let win_path = r"C:\foo\bar.png";
+        assert_eq!(to_absolute(win_path).unwrap(), win_path);
+        let win_path2 = r"C:/foo/bar.png";
+        assert_eq!(to_absolute(win_path2).unwrap(), win_path2);
+    }
+
+    #[test]
+    fn to_absolute_joins_relative_with_cwd() {
+        let result = to_absolute("foo.txt").unwrap();
+        // 相对路径拼接后应包含原始路径片段
+        assert!(
+            result.contains("foo.txt"),
+            "expected result to contain 'foo.txt', got: {}",
+            result
+        );
+        // 且应该是绝对路径形态
+        assert!(
+            Path::new(&result).is_absolute(),
+            "expected absolute path, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn to_absolute_handles_subdir_relative() {
+        let result = to_absolute("sub/dir/file.png").unwrap();
+        assert!(result.contains("file.png"));
+        assert!(Path::new(&result).is_absolute());
+    }
+
+    // ---------- read_file ----------
+
+    #[test]
+    fn read_file_rejects_nonexistent() {
+        let err = read_file("/this/path/does/not/exist/anywhere.json").unwrap_err();
+        assert!(err.contains("failed to read file"), "got: {}", err);
+    }
+
+    #[test]
+    fn read_file_strips_utf8_bom() {
+        // Windows PowerShell 默认输出带 BOM，必须剥离否则 JSON 解析失败
+        let path = temp_file("bom.txt");
+        // \u{feff} 是 UTF-8 BOM
+        fs::write(&path, "\u{feff}hello world").unwrap();
+        let result = read_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(result, "hello world");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_file_reads_normal_content() {
+        let path = temp_file("normal.txt");
+        fs::write(&path, "plain content without bom").unwrap();
+        let result = read_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(result, "plain content without bom");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_file_rejects_too_large() {
+        // MAX_FILE_BYTES = 2MB，创建刚好超限的文件（防 OOM）
+        let path = temp_file("large.txt");
+        let over_limit = MAX_FILE_BYTES + 1;
+        fs::write(&path, vec![b'X'; over_limit as usize]).unwrap();
+        let err = read_file(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("too large"), "got: {}", err);
+        let _ = fs::remove_file(&path);
+    }
+
+    // ---------- build_window_config ----------
+
+    #[test]
+    fn build_window_config_returns_none_when_no_args() {
+        let common = empty_common();
+        assert!(build_window_config(&common).is_none());
+    }
+
+    #[test]
+    fn build_window_config_with_width_only() {
+        let mut common = empty_common();
+        common.width = Some(500);
+        let cfg = build_window_config(&common).expect("expected Some");
+        assert_eq!(cfg.width, Some(500));
+        assert!(cfg.height.is_none());
+        assert!(cfg.always_on_top.is_none());
+        assert!(cfg.x.is_none());
+        assert!(cfg.y.is_none());
+    }
+
+    #[test]
+    fn build_window_config_with_no_always_on_top() {
+        let mut common = empty_common();
+        common.no_always_on_top = true;
+        let cfg = build_window_config(&common).expect("expected Some");
+        assert_eq!(cfg.always_on_top, Some(false));
+    }
+
+    #[test]
+    fn build_window_config_height_numeric_string() {
+        let mut common = empty_common();
+        common.height = Some("100".to_string());
+        let cfg = build_window_config(&common).expect("expected Some");
+        match cfg.height {
+            Some(PinHeight::Number(n)) => assert_eq!(n, 100),
+            other => panic!("expected Number(100), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_window_config_height_auto_string() {
+        let mut common = empty_common();
+        common.height = Some("auto".to_string());
+        let cfg = build_window_config(&common).expect("expected Some");
+        match cfg.height {
+            Some(PinHeight::Auto(s)) => assert_eq!(s, "auto"),
+            other => panic!("expected Auto, got {:?}", other),
+        }
+    }
+
+    // ---------- build_source ----------
+
+    #[test]
+    fn build_source_returns_none_when_no_args() {
+        let common = empty_common();
+        assert!(build_source(&common).is_none());
+    }
+
+    #[test]
+    fn build_source_with_agent_only() {
+        let mut common = empty_common();
+        common.agent = Some("claude".to_string());
+        let src = build_source(&common).expect("expected Some");
+        assert_eq!(src.agent.as_deref(), Some("claude"));
+        assert!(src.workspace.is_none());
+        assert!(src.task.is_none());
+        assert!(src.conversation_id.is_none());
+    }
+
+    #[test]
+    fn build_source_with_all_fields() {
+        let mut common = empty_common();
+        common.agent = Some("codex".to_string());
+        common.workspace = Some("/repo".to_string());
+        common.task = Some("review".to_string());
+        let src = build_source(&common).expect("expected Some");
+        assert_eq!(src.agent.as_deref(), Some("codex"));
+        assert_eq!(src.workspace.as_deref(), Some("/repo"));
+        assert_eq!(src.task.as_deref(), Some("review"));
+        assert!(src.conversation_id.is_none());
+    }
+
+    // ---------- build_pin_doc ----------
+
+    #[test]
+    fn build_pin_doc_basic_markdown() {
+        let common = empty_common();
+        let doc = build_pin_doc(
+            "Test Title",
+            vec![PinBlock::Markdown(MarkdownBlock {
+                content: "## Hello".to_string(),
+            })],
+            &common,
+        );
+        assert_eq!(doc.version, 1);
+        assert_eq!(doc.title, "Test Title");
+        assert_eq!(doc.blocks.len(), 1);
+        assert!(doc.window.is_none());
+        assert!(doc.source.is_none());
+        assert!(doc.created_at.is_none());
+    }
+
+    #[test]
+    fn build_pin_doc_includes_window_when_args_present() {
+        let mut common = empty_common();
+        common.width = Some(420);
+        let doc = build_pin_doc(
+            "T",
+            vec![PinBlock::Markdown(MarkdownBlock {
+                content: "x".to_string(),
+            })],
+            &common,
+        );
+        assert!(doc.window.is_some());
+        assert_eq!(doc.window.as_ref().unwrap().width, Some(420));
+    }
+}
