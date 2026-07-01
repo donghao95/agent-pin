@@ -100,6 +100,16 @@ jobs:
           cargo clippy --manifest-path packages/cli/Cargo.toml --all-targets -- -D warnings
           cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
 
+      - name: Install cargo-audit
+        # 用 taiki-e/install-action 从 GitHub Release 下载预编译 binary（秒级），
+        # 替代 `cargo install cargo-audit --locked`（源码编译，约 10 分钟）。
+        # taiki-e 是 Rust 生态知名维护者（cargo-hack / cargo-quickinstall），此 action
+        # 被 tokio / serde 等主流项目使用。自带 SHA256 校验，安全可靠。
+        # 若预编译不可用，自动 fallback 到 cargo-binstall → cargo install，不会比现状更差。
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
       - name: Cargo audit (RustSec advisories)
         shell: bash
         # 项目根目录无 Cargo.toml/Cargo.lock，3 个 crate 各自维护独立 lockfile。
@@ -108,7 +118,6 @@ jobs:
         # unic-* / proc-macro-error）存在 unmaintained/unsound 告警，这些属于上游
         # 维护状态，项目层面无法修复；保留对真正 vulnerability 的失败检查即可。
         run: |
-          cargo install cargo-audit --locked
           cargo audit --file packages/shared/Cargo.lock
           cargo audit --file packages/cli/Cargo.lock
           cargo audit --file apps/desktop/src-tauri/Cargo.lock
