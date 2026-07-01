@@ -16,7 +16,7 @@
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use crate::pin::{PinDocument, PinHeight};
+use crate::pin::{PinDocument, PinHeight, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 
 /// 默认窗口宽度
 const DEFAULT_WIDTH: f64 = 420.0;
@@ -84,6 +84,10 @@ pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Re
         .shadow(true)
         .always_on_top(always_on_top)
         .resizable(true)
+        // 最小尺寸约束：用户缩放时不会小于此值，保证内容可读性（见 docs/05_ui_style.md §4）。
+        // 常量来自 packages/shared，与 validate 的最小值校验对齐（单一事实源），
+        // 确保 API 层拒绝的值与窗口层强制的值一致，避免静默放大。
+        .min_inner_size(MIN_WINDOW_WIDTH as f64, MIN_WINDOW_HEIGHT as f64)
         .skip_taskbar(true)
         .visible(true)
         .build()
