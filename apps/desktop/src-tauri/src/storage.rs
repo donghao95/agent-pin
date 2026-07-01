@@ -249,7 +249,11 @@ pub(crate) fn save_state_to(root: &std::path::Path, state: &StateFile) -> std::i
     let s = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     // 原子写：write + fsync + rename，确保数据落盘后再替换
     write_and_sync(&tmp, &s)?;
-    fs::rename(&tmp, &path)?;
+    if let Err(e) = fs::rename(&tmp, &path) {
+        // rename 失败时清理残留 tmp 文件，避免堆积
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -273,7 +277,10 @@ pub(crate) fn save_pin_doc_to(
     let tmp = path.with_extension("json.tmp");
     let s = serde_json::to_string_pretty(doc).map_err(std::io::Error::other)?;
     write_and_sync(&tmp, &s)?;
-    fs::rename(&tmp, &path)?;
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -418,18 +425,12 @@ mod tests {
 
     // ---------- P1: 持久化 I/O 测试（用 data_dir_for 注入 tempdir） ----------
 
-    /// 辅助：构造临时 root 目录，测试结束后自动清理。
+    /// 辅助：构造临时 root 目录，测试结束后自动清理（含 panic 时）。
+    /// 用 tempfile::TempDir 避免 Windows SystemTime 精度低导致的并发路径冲突。
     fn with_temp_root(f: impl FnOnce(&std::path::Path)) {
-        let tmp = std::env::temp_dir().join(format!(
-            "agent-pin-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        f(&tmp);
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        f(tmp.path());
+        // tmp drop 时自动清理
     }
 
     #[test]

@@ -528,18 +528,12 @@ mod tests {
 
     // ---------- P1: 持久化与回滚测试（用 with_root 注入 tempdir） ----------
 
-    /// 辅助：构造临时 root 目录，测试结束后自动清理。
+    /// 辅助：构造临时 root 目录，测试结束后自动清理（含 panic 时）。
+    /// 用 tempfile::TempDir 避免 Windows SystemTime 精度低导致的并发路径冲突。
     fn with_temp_root(f: impl FnOnce(&std::path::Path)) {
-        let tmp = std::env::temp_dir().join(format!(
-            "agent-pin-reg-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        f(&tmp);
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        f(tmp.path());
+        // tmp drop 时自动清理
     }
 
     /// 辅助：构造最小 PinDocument。
@@ -834,6 +828,132 @@ mod tests {
             // n=1 截断
             let recent1 = reg.list_recent_hidden(1);
             assert_eq!(recent1.len(), 1);
+        });
+    }
+
+    // ---------- P2: 错误路径 / 回滚测试 ----------
+    //
+    // 用"state.json 路径被目录占用"技巧触发 persist_state 失败：
+    // save_state_to 的 rename(tmp, state.json) 在目标是目录时会失败，
+    // 而 save_pin_doc 仍能正常写（pins/ 目录已创建，不受 state.json 冲突影响）。
+    // 这样可以精确测试"doc 写成功但 state.json 写失败"的回滚分支。
+
+    /// 辅助：在 root 下创建 state.json 目录占位，让 persist_state 的 rename 失败。
+    /// 如果 state.json 已作为文件存在（如 insert 正常写入后），先删除再建目录。
+    fn make_state_json_a_dir(root: &std::path::Path) {
+        let state_path = storage::state_file_path_for(root);
+        if state_path.exists() {
+            std::fs::remove_file(&state_path).expect("remove existing state.json");
+        }
+        // create_dir_all 确保父目录存在，不依赖外部 init_to 前置调用
+        std::fs::create_dir_all(&state_path).expect("create state.json as dir");
+    }
+
+    #[test]
+    fn test_insert_rolls_back_on_persist_failure() {
+        with_temp_root(|root| {
+            // 先正常 init（创建 pins/ 目录），再把 state.json 占为目录
+            storage::init_to(root).expect("init");
+            make_state_json_a_dir(root);
+
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let pin_id = "pin_a00_000001".to_string();
+            let result = reg.insert(pin_id.clone(), make_doc("Rollback Test"));
+
+            // insert 应返回 Err（persist_state 失败）
+            assert!(result.is_err(), "insert must fail when persist fails");
+            // 回滚：内存中不应有该 Pin
+            assert!(
+                reg.get(&pin_id).is_none(),
+                "pin must be removed from memory after rollback"
+            );
+            assert!(
+                reg.get_meta(&pin_id).is_none(),
+                "meta must be removed from memory after rollback"
+            );
+            // 回滚：doc 文件也应被删除（避免孤儿文件）
+            assert!(
+                !storage::pin_file_path_for(root, &pin_id).exists(),
+                "doc file must be deleted after rollback"
+            );
+        });
+    }
+
+    #[test]
+    fn test_set_state_rolls_back_on_persist_failure() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 先正常插入一个 Pin（state.json 此时正常写）
+            reg.insert("pin_b00_000001".to_string(), make_doc("Before Break"))
+                .expect("insert before break");
+            let original_state = reg.get_meta("pin_b00_000001").unwrap().state;
+            let original_updated_at = reg.get_meta("pin_b00_000001").unwrap().updated_at.clone();
+
+            // 破坏 state.json（占为目录），让后续 persist_state 失败
+            make_state_json_a_dir(root);
+
+            // 尝试 set_state，应失败
+            let result = reg.set_state("pin_b00_000001", PinState::Hidden);
+            assert!(result.is_err(), "set_state must fail when persist fails");
+
+            // 回滚：内存状态恢复为原值
+            let meta = reg.get_meta("pin_b00_000001").expect("pin still in memory");
+            assert_eq!(
+                meta.state, original_state,
+                "state must be rolled back after persist failure"
+            );
+            assert_eq!(
+                meta.updated_at, original_updated_at,
+                "updated_at must be rolled back after persist failure"
+            );
+        });
+    }
+
+    #[test]
+    fn test_remove_rolls_back_on_persist_failure() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 先正常插入一个 Pin
+            reg.insert("pin_c00_000001".to_string(), make_doc("To Remove"))
+                .expect("insert");
+
+            // 破坏 state.json，让 persist_state 失败
+            make_state_json_a_dir(root);
+
+            // 尝试 remove，应失败（persist 失败时把 entry 放回内存）
+            let result = reg.remove("pin_c00_000001");
+            assert!(result.is_err(), "remove must fail when persist fails");
+
+            // 回滚：Pin 仍在内存中
+            assert!(
+                reg.get("pin_c00_000001").is_some(),
+                "pin must be restored to memory after remove rollback"
+            );
+            assert!(
+                reg.get_meta("pin_c00_000001").is_some(),
+                "meta must be restored to memory after remove rollback"
+            );
+        });
+    }
+
+    #[test]
+    fn test_remove_doc_file_survives_if_state_persist_fails() {
+        // remove 的回滚只把 entry 放回内存，不重新创建 doc 文件
+        // （因为 doc 文件还没被删——remove 先 persist state 再删 doc）
+        // 所以 persist 失败时 doc 文件仍在磁盘上（这是设计预期，非 bug）
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_d00_000001".to_string(), make_doc("Doc Survives"))
+                .expect("insert");
+
+            make_state_json_a_dir(root);
+
+            let _ = reg.remove("pin_d00_000001");
+            // doc 文件仍在（remove 在 persist 失败前不会删 doc）
+            assert!(
+                storage::pin_file_path_for(root, "pin_d00_000001").exists(),
+                "doc file should still exist when state persist fails (remove deletes doc after state)"
+            );
         });
     }
 }

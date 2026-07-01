@@ -186,7 +186,12 @@ fn fetch_latest_release() -> Result<Option<GithubRelease>, String> {
 
 /// 读缓存文件。文件不存在或解析失败返回 None（不阻塞）。
 fn read_cache() -> Option<UpdateCache> {
-    let path = cache_path();
+    read_cache_from(&storage::home_or_fallback())
+}
+
+/// 在指定 root 下读缓存（测试用）。root 语义同 storage::data_dir_for（root 当 home）。
+fn read_cache_from(root: &std::path::Path) -> Option<UpdateCache> {
+    let path = cache_path_for(root);
     let content = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
@@ -194,27 +199,37 @@ fn read_cache() -> Option<UpdateCache> {
 /// 写缓存文件。失败返回 Err（调用方 eprintln）。
 /// m14：与 storage.rs 一致，使用 write + fsync + rename 原子写。
 fn write_cache(latest_version: &str) -> Result<(), String> {
-    let path = cache_path();
+    write_cache_to(&storage::home_or_fallback(), latest_version)
+}
+
+/// 在指定 root 下写缓存（测试用）。
+fn write_cache_to(root: &std::path::Path, latest_version: &str) -> Result<(), String> {
+    let path = cache_path_for(root);
     let cache = UpdateCache {
         last_checked_at: now_rfc3339(),
         latest_version: latest_version.to_string(),
     };
     let json = serde_json::to_string_pretty(&cache).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     let tmp = path.with_extension("tmp");
     use std::io::Write;
     let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
     f.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())?;
     drop(f);
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
-/// 缓存文件路径：~/.agent-pin/update-cache.json
-/// 与 storage.rs 的 data_dir 一致。
-/// M13 修复：data_dir() 总是返回 PathBuf（None 场景已 fallback 到 "."），
-/// 因此这里直接返回 PathBuf，不再用 Option 包装假 None 语义。
-fn cache_path() -> std::path::PathBuf {
-    storage::data_dir().join("update-cache.json")
+/// 在指定 root 下计算缓存路径。
+/// production 传 storage::home_or_fallback()，测试传 tempdir。
+fn cache_path_for(root: &std::path::Path) -> std::path::PathBuf {
+    storage::data_dir_for(root).join("update-cache.json")
 }
 
 /// 判断缓存是否在有效期内（24h）。
@@ -459,5 +474,57 @@ mod tests {
             latest_version: "0.1.1".to_string(),
         };
         assert!(!is_cache_fresh(&cache), "empty timestamp must not be fresh");
+    }
+
+    // ---------- 缓存 I/O 测试（用 cache_path_for 注入 tempdir） ----------
+
+    /// 辅助：构造临时 root 目录，测试结束后自动清理（含 panic 时）。
+    /// 用 tempfile::TempDir 避免 Windows SystemTime 精度低导致的并发路径冲突。
+    fn with_temp_root(f: impl FnOnce(&std::path::Path)) {
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        f(tmp.path());
+        // tmp drop 时自动清理
+    }
+
+    #[test]
+    fn test_write_and_read_cache_roundtrip() {
+        with_temp_root(|root| {
+            write_cache_to(root, "0.2.0").expect("write should succeed");
+
+            let cache = read_cache_from(root).expect("read should return cached value");
+            assert_eq!(cache.latest_version, "0.2.0");
+            // last_checked_at 必须是合法 RFC3339（能被 is_cache_fresh 解析）
+            assert!(chrono::DateTime::parse_from_rfc3339(&cache.last_checked_at).is_ok());
+            // 刚写入的缓存必须 fresh
+            assert!(is_cache_fresh(&cache), "just-written cache must be fresh");
+        });
+    }
+
+    #[test]
+    fn test_read_cache_missing_returns_none() {
+        with_temp_root(|root| {
+            // 未写入缓存时读取，应返回 None（不 panic，不阻塞）
+            assert!(read_cache_from(root).is_none());
+        });
+    }
+
+    #[test]
+    fn test_read_cache_corrupt_returns_none() {
+        with_temp_root(|root| {
+            // 写入损坏的 JSON 到缓存路径
+            let path = cache_path_for(root);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{ this is not valid json").unwrap();
+
+            // 损坏文件应返回 None，不 panic
+            assert!(read_cache_from(root).is_none());
+        });
+    }
+
+    #[test]
+    fn test_cache_path_for_construction() {
+        let path = cache_path_for(std::path::Path::new("/tmp/fake-home"));
+        assert!(path.to_string_lossy().ends_with("update-cache.json"));
+        assert!(path.to_string_lossy().contains(".agent-pin"));
     }
 }

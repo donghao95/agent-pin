@@ -34,3 +34,10 @@ agent-pin-shared = { path = "../../../packages/shared" }
 [features]
 # 这个 feature 在 tauri build (release) 时由 CLI 自动启用
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+# csrf_guard 中间件测试用 ServiceExt::oneshot 构造模拟请求
+tower = { version = "0.5", features = ["util"] }
+# 测试用临时目录：Windows 上 SystemTime 精度约 15ms，多线程并发会生成相同路径。
+# tempfile 内部用 atomic counter + 随机，避免冲突，且自动 cleanup。
+tempfile = "3"
