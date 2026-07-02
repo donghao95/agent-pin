@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "title": "装修效果参考",
+  "blocks": [
+    {
+      "type": "markdown",
+      "content": "## 说明\n这张图适合作为入门柜风格参考。\n\n重点看：\n- 柜体高度\n- 中部留空\n- 底部悬空\n- 灯带位置"
+    },
+    {
+      "type": "image",
+      "path": "C:/Users/<username>/Desktop/cabinet-reference.png",
+      "caption": "入门柜效果参考图"
+    }
+  ],
+  "window": {
+    "width": 520,
+    "height": "auto",
+    "alwaysOnTop": true
+  }
+}

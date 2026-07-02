@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "title": "TryCue 审查状态",
+  "blocks": [
+    {
+      "type": "status",
+      "level": "success",
+      "text": "PR 审查完成：发现 2 个问题，建议先修第一个。"
+    }
+  ],
+  "source": {
+    "agent": "codex",
+    "workspace": "TryCue",
+    "task": "PR Review"
+  }
+}

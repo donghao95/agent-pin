@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "title": "产品判断",
+  "blocks": [
+    {
+      "type": "markdown",
+      "content": "## 结论\n第一版应该做成 Agent 版 PixPin，而不是 Artifact 或 Pinboard。\n\n### 原因\n- 更轻量\n- 更高频\n- 更适合桌面常驻\n- 更容易让 Agent 使用"
+    }
+  ],
+  "window": {
+    "width": 420,
+    "height": "auto",
+    "alwaysOnTop": true
+  }
+}

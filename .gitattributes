@@ -1,0 +1,23 @@
+# 跨平台统一行尾为 LF，避免 autocrlf 引入的换行符噪声
+# Rust / JS / JSON / Markdown 项目均以 LF 为规范
+* text=auto eol=lf
+
+# Windows 脚本保持 CRLF：cmd.exe 对 LF-only 批处理解析有问题（标签/goto 错位）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.msi binary
+*.exe binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary

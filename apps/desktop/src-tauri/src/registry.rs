@@ -1,0 +1,1235 @@
+// Pin 内存注册表 + 持久化集成
+//
+// 职责：
+// - 以 pinId 为 key 保存 PinEntry（doc + meta），供前端 invoke 读取
+// - 集成持久化：insert / set_state / remove 时同步写 state.json 和 pins/{pinId}.json
+// - 启动时从磁盘加载历史 Pin（load_from_disk）
+//
+// 设计：
+// - 全局单例（once_cell::Lazy），HTTP handler 和 Tauri invoke 共用。
+//   选型理由：axum handler 和 Tauri invoke 是两套 state 体系，全局单例最简单且单进程无并发问题。
+// - 内存中持有完整 PinEntry（doc + meta），避免每次 get 都读磁盘。
+// - state.json 在每次变更后从内存重新生成（Pin 数量少，性能可接受）。
+//
+// Phase 2-B 改动（相对 Phase 1）：
+// - 从纯内存改为内存 + 持久化
+// - 关闭窗口 = set_state(hidden)，不删除记录
+// - 删除 Pin = remove（删记录 + 删 pins/{pinId}.json + 更新 state.json）
+// - 启动时 load_from_disk 恢复历史
+//
+// 契约来源：docs/02_architecture.md §3/§5、docs/06_phase_plan.md Phase 2-B
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+
+use once_cell::sync::{Lazy, OnceCell};
+use tauri::{AppHandle, Emitter};
+
+use crate::pin::PinDocument;
+use crate::storage::{self, PinMeta, PinState, StateFile, WindowSize};
+
+// ---------- AppHandle 持有 + 事件广播 ----------
+//
+// 设计理由：
+// registry 是 Pin 状态变更的唯一入口（insert/set_state/remove）。
+// 状态变更后需要通知所有视图（托盘菜单、管理界面列表）刷新。
+// 旧设计由各调用点手动调 tray::refresh()，容易遗漏（create_pin 就漏了），
+// 且 tray::refresh 职责过载（既管托盘菜单，又被当作状态广播入口）。
+//
+// 新设计：registry 持有 AppHandle，在状态变更成功后统一 emit "pins:changed" 事件。
+// 托盘和管理界面各自 listen 该事件自动刷新，调用方不再需要手动调 tray::refresh。
+// 这是发布订阅模式：状态变更是事件源，视图是订阅者，解耦状态管理与视图刷新。
+
+/// 应用启动时注入的 AppHandle，用于 emit 事件。
+/// 在 lib.rs setup 中 load_from_disk 之前 set。
+static APP_HANDLE: OnceCell<AppHandle> = OnceCell::new();
+
+/// 注入 AppHandle。只能在启动时调用一次。
+/// 重复调用时打日志而非静默忽略，便于发现启动流程异常。
+pub fn set_app_handle(app: AppHandle) {
+    if APP_HANDLE.set(app).is_err() {
+        eprintln!("[agent-pin] set_app_handle called more than once, ignoring");
+    }
+}
+
+/// 广播 pins:changed 事件，通知所有订阅者（托盘、管理界面）刷新。
+/// 在 insert/set_state/remove 成功后调用。
+///
+/// load_from_disk 不调用 emit_changed，原因有二：
+/// 1. 代码层面：load_from_disk 直接操作 inner HashMap（直接修改 meta.state），
+///    不经过 set_state/insert/remove，所以不会触发 emit。
+/// 2. 业务层面：启动时托盘尚未 build、管理界面尚未打开，无订阅者，emit 无意义。
+///
+/// 公开是为了支持批量操作（如 hide_all_visible）：批量操作在循环内用
+/// set_state_quiet 避免每次都 emit，循环结束后由调用方统一调用 emit_changed 一次，
+/// 避免 N 次 emit 触发 N 次同步托盘菜单重建。
+pub fn emit_changed() {
+    if let Some(app) = APP_HANDLE.get() {
+        if let Err(e) = app.emit("pins:changed", ()) {
+            eprintln!("[agent-pin] registry emit pins:changed: {}", e);
+        }
+    }
+}
+
+// ---------- PinEntry ----------
+
+/// 内存中的 Pin 完整记录。
+/// doc 用于渲染，meta 用于列表/状态管理。
+#[derive(Clone)]
+pub struct PinEntry {
+    pub doc: PinDocument,
+    pub meta: PinMeta,
+}
+
+// ---------- PinRegistry ----------
+
+pub struct PinRegistry {
+    inner: Mutex<HashMap<String, PinEntry>>,
+    /// 测试用 root：Some 时所有 I/O 写入该目录，None 时走 storage::data_dir()。
+    /// production 代码用 new()（root=None），测试用 with_root(tempdir)。
+    root: Option<std::path::PathBuf>,
+    /// 正在重建窗口的 pin_id 集合。
+    /// show_pin 重建窗口时，cleanup 旧窗口会触发 Destroyed 事件。
+    /// 用此标志区分"重建中的 cleanup"和"用户正常关闭"，避免 Destroyed 事件误覆盖新窗口 state。
+    /// 替代旧方案中依赖 get_webview_window 时序判断（Tauri 2 Destroyed 触发时窗口可能未注销，返回 Some 误判）。
+    recreating: Mutex<HashSet<String>>,
+}
+
+impl PinRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            root: None,
+            recreating: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// 测试用构造器：所有持久化 I/O 写入 root 目录。
+    /// production 代码用 new()，测试用 with_root(tempdir) 避免污染真实文件系统。
+    #[cfg(test)]
+    pub fn with_root(root: std::path::PathBuf) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            root: Some(root),
+            recreating: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// 根据是否有 root 返回 storage 模块对应的 save_pin_doc 函数。
+    /// 无 root 调 production 版，有 root 调测试版。
+    fn save_pin_doc(&self, pin_id: &str, doc: &PinDocument) -> std::io::Result<()> {
+        match &self.root {
+            None => storage::save_pin_doc(pin_id, doc),
+            Some(root) => storage::save_pin_doc_to(root, pin_id, doc),
+        }
+    }
+
+    fn delete_pin_doc(&self, pin_id: &str) -> std::io::Result<()> {
+        match &self.root {
+            None => storage::delete_pin_doc(pin_id),
+            Some(root) => storage::delete_pin_doc_from(root, pin_id),
+        }
+    }
+
+    fn load_state(&self) -> storage::StateFile {
+        match &self.root {
+            None => storage::load_state(),
+            Some(root) => storage::load_state_from(root),
+        }
+    }
+
+    fn load_pin_doc(&self, pin_id: &str) -> Option<PinDocument> {
+        match &self.root {
+            None => storage::load_pin_doc(pin_id),
+            Some(root) => storage::load_pin_doc_from(root, pin_id),
+        }
+    }
+
+    fn persist_state(&self, inner: &HashMap<String, PinEntry>) -> std::io::Result<()> {
+        let mut pins: Vec<PinMeta> = inner.values().map(|e| e.meta.clone()).collect();
+        pins.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        let state = StateFile { version: 1, pins };
+        match &self.root {
+            None => storage::save_state(&state),
+            Some(root) => storage::save_state_to(root, &state),
+        }
+    }
+
+    /// 插入新 Pin（state=visible）。
+    /// 顺序：
+    ///   1. 写 pins/{pinId}.json（失败则不插入内存，返回 Err）
+    ///   2. 加锁，插入内存 entry
+    /// 3. 写 state.json（失败则回滚：移除内存 entry + 删 pins/{pinId}.json + 返回 Err）
+    ///
+    /// 回滚理由：state.json 是重启后 load_from_disk 的唯一来源，若写失败而不回滚，
+    /// 重启后该 Pin 不在 state.json 中，pins/{pinId}.json 成为永久孤儿文件，且用户无法通过
+    /// 管理界面看到或删除它（管理界面读内存 list()，而内存会在重启后从 state.json 重建）。
+    pub fn insert(&self, pin_id: String, doc: PinDocument) -> Result<PinMeta, String> {
+        // 1. 先写 doc（失败则不插入内存，避免内存与磁盘不一致）
+        if let Err(e) = self.save_pin_doc(&pin_id, &doc) {
+            return Err(format!("failed to save pin doc: {}", e));
+        }
+
+        let meta = build_meta(&pin_id, &doc, PinState::Visible);
+
+        // 2. 加锁，插入内存 + 写 state
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.insert(
+            pin_id.clone(),
+            PinEntry {
+                doc,
+                meta: meta.clone(),
+            },
+        );
+
+        // 3. 写 state（失败则回滚：移除内存 entry，释放锁后删 doc 文件）
+        if let Err(e) = self.persist_state(&inner) {
+            inner.remove(&pin_id);
+            drop(inner); // 释放锁后再做文件 I/O，避免持锁阻塞其他操作
+            if let Err(del_err) = self.delete_pin_doc(&pin_id) {
+                eprintln!(
+                    "[agent-pin] rollback delete_pin_doc failed for {}: {}",
+                    pin_id, del_err
+                );
+            }
+            return Err(format!("failed to save state.json: {}", e));
+        }
+
+        drop(inner); // 显式释放锁后再 emit，避免事件 handler 尝试加锁导致死锁
+        emit_changed();
+        Ok(meta)
+    }
+
+    /// 读取 PinDocument（兼容 invoke get_pin_document）。
+    /// M4：与 insert/set_state/remove 等方法一致，使用 unwrap_or_else 恢复中毒锁，
+    /// 避免 mutex 中毒时 panic 传播到 HTTP handler / Tauri invoke / 窗口事件处理。
+    pub fn get(&self, pin_id: &str) -> Option<PinDocument> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(pin_id)
+            .map(|e| e.doc.clone())
+    }
+
+    /// 读取 PinMeta。
+    /// M4：同 get，统一中毒锁恢复策略。
+    pub fn get_meta(&self, pin_id: &str) -> Option<PinMeta> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(pin_id)
+            .map(|e| e.meta.clone())
+    }
+
+    /// 更新 Pin 状态（visible ↔ hidden ↔ failed）。
+    /// 同时更新 updated_at 和 state.json。
+    /// Pin 不存在时返回 Err。持久化失败时返回 Err 并回滚内存状态（原子性：内存与磁盘一致）。
+    /// 回滚理由：若持久化失败但保留内存变更，调用方收到 Err 后无法判断内存状态，
+    /// 且重启后磁盘恢复旧状态会造成内存/磁盘长期不一致。回滚保证 set_state 全成功或全失败。
+    pub fn set_state(&self, pin_id: &str, state: PinState) -> Result<(), String> {
+        self.set_state_inner(pin_id, state)?;
+        emit_changed();
+        Ok(())
+    }
+
+    /// 静默更新状态：与 set_state 逻辑一致，但不 emit pins:changed 事件。
+    /// 供批量操作（如 hide_all_visible）使用：循环内用 quiet 版本避免 N 次 emit
+    /// 触发 N 次同步托盘菜单重建，循环结束后由调用方统一调用 emit_changed 一次。
+    pub fn set_state_quiet(&self, pin_id: &str, state: PinState) -> Result<(), String> {
+        self.set_state_inner(pin_id, state)
+    }
+
+    /// set_state / set_state_quiet 的共享实现。
+    /// 持有锁更新内存状态 + 持久化 state.json（失败回滚），不 emit 事件。
+    fn set_state_inner(&self, pin_id: &str, state: PinState) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = inner
+            .get_mut(pin_id)
+            .ok_or_else(|| format!("pin not found: {}", pin_id))?;
+        let old_state = entry.meta.state;
+        let old_updated_at = entry.meta.updated_at.clone();
+        entry.meta.state = state;
+        entry.meta.updated_at = now_iso();
+
+        if let Err(e) = self.persist_state(&inner) {
+            eprintln!(
+                "[agent-pin] failed to save state.json after set_state (rolling back memory): {}",
+                e
+            );
+            // 回滚内存状态，保证内存 == 最后一次成功落盘的状态
+            if let Some(entry) = inner.get_mut(pin_id) {
+                entry.meta.state = old_state;
+                entry.meta.updated_at = old_updated_at;
+            }
+            return Err(format!("failed to save state.json: {}", e));
+        }
+        drop(inner); // 释放锁（emit 由调用方负责）
+        Ok(())
+    }
+
+    /// 删除 Pin（不可恢复）。
+    /// 顺序：
+    ///   1. 校验 pin_id 格式（防路径穿越）
+    ///   2. 加锁，从内存取出 entry（不存在直接返回 Ok，幂等）
+    ///   3. 同一锁作用域内写 state.json（已不含此 Pin）。失败则把 entry 放回内存，返回 Err
+    /// 4. 释放锁后删 pins/{pinId}.json（best-effort，失败仅 eprintln，不影响结果）
+    ///
+    /// 设计理由：
+    /// - 先持久化 state.json 成功后再删 doc 文件，避免"doc 已删但 state.json 仍引用"
+    ///   的不一致（那种状态重启后会让 Pin 以 failed 复活）。doc 删除失败只会留下孤儿文件，
+    ///   load_from_disk 不会拾取它（state.json 不引用），无害。
+    /// - 步骤 2 和 3 在同一锁作用域内，避免两次加锁之间存在一致性窗口
+    ///   （M-1 修复：否则并发 list()/get_meta() 会观测到"内存已无但 state.json 仍有"的瞬态）。
+    pub fn remove(&self, pin_id: &str) -> Result<(), String> {
+        // 1. 校验 pin_id 格式（防路径穿越，M1）
+        storage::validate_pin_id(pin_id)?;
+
+        // 2-3. 加锁，取出 entry + 写 state.json（同一锁作用域，避免一致性窗口）
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = match inner.remove(pin_id) {
+                Some(e) => e,
+                None => return Ok(()), // 幂等：不存在直接返回
+            };
+
+            if let Err(e) = self.persist_state(&inner) {
+                // 回滚：把 entry 放回内存，保持内存与磁盘（旧 state.json）一致
+                inner.insert(pin_id.to_string(), entry);
+                eprintln!(
+                    "[agent-pin] failed to save state.json after remove (rolling back memory): {} (pin_id={})",
+                    e, pin_id
+                );
+                return Err(format!("failed to save state.json: {}", e));
+            }
+        }
+
+        // 4. 释放锁后删 doc 文件（best-effort，失败仅日志，不影响删除结果）
+        if let Err(e) = self.delete_pin_doc(pin_id) {
+            eprintln!(
+                "[agent-pin] failed to delete pin doc after state.json removed (orphan file left): {} (pin_id={})",
+                e, pin_id
+            );
+        }
+        emit_changed();
+        Ok(())
+    }
+
+    /// 列出所有 Pin 的 meta（按 createdAt 降序，最新的在前）。
+    /// 用于管理界面完整历史列表。
+    pub fn list(&self) -> Vec<PinMeta> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pins: Vec<PinMeta> = inner.values().map(|e| e.meta.clone()).collect();
+        pins.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        pins
+    }
+
+    /// 列出最近 n 个 hidden Pin（按 updatedAt 降序，最近变更的在前）。
+    /// 用于托盘快恢菜单：点击即恢复显示。
+    /// 只列 hidden：visible 的窗口已存在，failed 的恢复会再失败。
+    pub fn list_recent_hidden(&self, n: usize) -> Vec<PinMeta> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pins: Vec<PinMeta> = inner
+            .values()
+            .filter(|e| e.meta.state == PinState::Hidden)
+            .map(|e| e.meta.clone())
+            .collect();
+        pins.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        pins.truncate(n);
+        pins
+    }
+
+    // ---------- 窗口重建标志 ----------
+    //
+    // show_pin 重建窗口时，cleanup 旧窗口会触发 Destroyed 事件。
+    // Destroyed 事件需要区分"重建中的 cleanup"（跳过 state 更新）和"用户正常关闭"（设 Hidden）。
+    // 旧方案用 get_webview_window(pin_id).is_some() 判断，但 Tauri 2 的 Destroyed 事件触发时
+    // 窗口可能还未从内部管理器注销，返回 Some（正在销毁的窗口本身），导致正常关闭也被误判为重建，
+    // 跳过 set_state(Hidden)，不 emit pins:changed，管理页不刷新。
+    //
+    // 新方案用显式标志：show_pin 重建前 mark_recreating，重建完成 unmark_recreating，
+    // Destroyed 事件检查 is_recreating。不依赖 Tauri 内部时序，架构更可靠。
+
+    /// 标记 pin_id 正在重建窗口。show_pin 重建前调用。
+    pub fn mark_recreating(&self, pin_id: &str) {
+        self.recreating
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pin_id.to_string());
+    }
+
+    /// 清除 pin_id 的重建标志。show_pin 重建完成（成功或失败）后调用。
+    pub fn unmark_recreating(&self, pin_id: &str) {
+        self.recreating
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(pin_id);
+    }
+
+    /// 检查 pin_id 是否正在重建窗口。Destroyed 事件中调用。
+    pub fn is_recreating(&self, pin_id: &str) -> bool {
+        self.recreating
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(pin_id)
+    }
+
+    // ---------- 窗口尺寸记忆 ----------
+    //
+    // 用户手动 resize 窗口后，持久化尺寸到 PinMeta.window_size。
+    // show 时优先用记忆尺寸恢复窗口，而非 doc.window 或默认值。
+    // fit_pin_window_height 的自动调整不调用此方法（只记录用户主动 resize）。
+
+    /// 记录用户手动调整后的窗口尺寸（逻辑像素）。
+    /// 更新 PinMeta.window_size + 持久化 state.json。
+    /// 不 emit pins:changed：尺寸记忆不影响管理页列表显示（列表不展示尺寸）。
+    pub fn remember_window_size(
+        &self,
+        pin_id: &str,
+        width: f64,
+        height: f64,
+    ) -> Result<(), String> {
+        storage::validate_pin_id(pin_id)?;
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return Err(format!(
+                "invalid window size: {}x{} (expected positive finite)",
+                width, height
+            ));
+        }
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = inner
+            .get_mut(pin_id)
+            .ok_or_else(|| format!("pin not found: {}", pin_id))?;
+        // M1：保存旧值，persist 失败时恢复旧值而非清成 None。
+        // 原实现清成 None 会丢失之前的记忆尺寸（如用户先 resize 到 500x400，再 resize 到
+        // 600x800 时 persist 失败，会把记忆清空，下次打开用默认尺寸，丢失 500x400）。
+        let old_window_size = entry.meta.window_size.clone();
+        entry.meta.window_size = Some(WindowSize { width, height });
+        if let Err(e) = self.persist_state(&inner) {
+            // 回滚：恢复旧值（None 或之前的 WindowSize）
+            if let Some(entry) = inner.get_mut(pin_id) {
+                entry.meta.window_size = old_window_size;
+            }
+            return Err(format!("failed to save state.json: {}", e));
+        }
+        Ok(())
+    }
+
+    /// 启动时从磁盘加载历史 Pin。
+    /// - 读取 state.json
+    /// - 对每个 meta，加载对应的 pins/{pinId}.json
+    /// - doc 缺失/损坏的标记 failed，用占位 doc（避免 list() 漏掉）
+    /// - 所有 visible 状态改为 hidden（应用重启后窗口实际不可见，state.json 与实际保持一致）
+    /// - 有变更时持久化更新后的 state.json
+    ///
+    /// 不自动恢复窗口：用户从托盘快恢或管理界面主动 show。
+    /// 理由：重启后突然出现一堆窗口可能打扰用户；主动恢复更可控。
+    /// 满足 phase-plan.md "应用重启后历史仍在"——历史在 state.json，用户可恢复。
+    pub fn load_from_disk(&self) {
+        let state = self.load_state();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.clear();
+
+        let now = now_iso();
+        let mut changed = false;
+
+        for mut meta in state.pins {
+            // M5：校验从 state.json 读出的 pin_id 格式，防被篡改的 state.json 用于路径穿越。
+            // validate_pin_id 拒绝含 / \ .. \0 的 pin_id 以及保留 label "manager"。
+            if storage::validate_pin_id(&meta.pin_id).is_err() {
+                eprintln!(
+                    "[agent-pin] skipping pin with invalid id from state.json: {}",
+                    meta.pin_id
+                );
+                continue;
+            }
+
+            // visible → hidden（重启后窗口实际不可见）
+            if meta.state == PinState::Visible {
+                meta.state = PinState::Hidden;
+                meta.updated_at = now.clone();
+                changed = true;
+            }
+
+            // 加载 doc
+            let doc = match self.load_pin_doc(&meta.pin_id) {
+                Some(d) => d,
+                None => {
+                    eprintln!(
+                        "[agent-pin] pins/{}.json 缺失或损坏，标记为 failed",
+                        meta.pin_id
+                    );
+                    meta.state = PinState::Failed;
+                    meta.updated_at = now.clone();
+                    changed = true;
+                    // 占位 doc：让管理界面能显示，用户可删除
+                    PinDocument {
+                        version: 1,
+                        title: meta.title.clone(),
+                        blocks: vec![crate::pin::PinBlock::Markdown(crate::pin::MarkdownBlock {
+                            content: format!(
+                                "[数据缺失] Pin 文件 {} 损坏或丢失，请删除此 Pin",
+                                meta.pin_id
+                            ),
+                        })],
+                        window: None,
+                        source: meta.source.clone(),
+                        created_at: Some(meta.created_at.clone()),
+                    }
+                }
+            };
+
+            inner.insert(meta.pin_id.clone(), PinEntry { doc, meta });
+        }
+
+        if changed {
+            if let Err(e) = self.persist_state(&inner) {
+                eprintln!(
+                    "[agent-pin] failed to save state.json after load_from_disk: {}",
+                    e
+                );
+            }
+        }
+    }
+}
+
+pub static REGISTRY: Lazy<PinRegistry> = Lazy::new(PinRegistry::new);
+
+/// 生成 pinId：pin_<timestamp_ms>_<6位随机>
+/// 不使用 title 做 slug，避免中文/特殊字符/长度问题。
+pub fn generate_pin_id() -> String {
+    use rand::Rng;
+    let ts = chrono::Utc::now().timestamp_millis();
+    let rand6: u32 = rand::thread_rng().gen_range(0..1_000_000);
+    format!("pin_{}_{:06}", ts, rand6)
+}
+
+// ---------- 内部辅助 ----------
+
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// 构造 PinMeta。
+/// created_at 优先用 doc.createdAt（CLI 可能设置），否则用当前时间。
+fn build_meta(pin_id: &str, doc: &PinDocument, state: PinState) -> PinMeta {
+    let now = now_iso();
+    let created_at = doc.created_at.clone().unwrap_or_else(|| now.clone());
+    PinMeta {
+        pin_id: pin_id.to_string(),
+        title: doc.title.clone(),
+        created_at,
+        updated_at: now,
+        state,
+        source: doc.source.clone(),
+        window_size: None, // 新建 Pin 无记忆尺寸，首次 show 时由 fit 或 doc.window 决定
+    }
+}
+
+// ---------- 测试 ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_pin_id_format() {
+        let id = generate_pin_id();
+        assert!(
+            id.starts_with("pin_"),
+            "pin_id must start with 'pin_': {}",
+            id
+        );
+        let parts: Vec<&str> = id.split('_').collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "pin_id must have 3 underscore-separated parts: {}",
+            id
+        );
+        assert_eq!(parts[0], "pin");
+        // timestamp 必须可解析为 i64
+        parts[1]
+            .parse::<i64>()
+            .expect("timestamp part must be numeric");
+        // 随机部分必须 6 位数字
+        assert_eq!(parts[2].len(), 6, "random part must be 6 digits: {}", id);
+        parts[2]
+            .parse::<u32>()
+            .expect("random part must be numeric");
+    }
+
+    #[test]
+    fn test_generate_pin_id_uniqueness() {
+        // 连续生成 100 个 id，应全部不同
+        let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for _ in 0..100 {
+            ids.insert(generate_pin_id());
+        }
+        assert_eq!(ids.len(), 100, "generated pin_ids should be unique");
+    }
+
+    #[test]
+    fn test_registry_new_empty() {
+        let reg = PinRegistry::new();
+        assert!(reg.list().is_empty());
+        assert!(reg.list_recent_hidden(5).is_empty());
+        assert!(reg.get("nonexistent").is_none());
+        assert!(reg.get_meta("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_build_meta_uses_doc_created_at() {
+        let doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![],
+            window: None,
+            source: None,
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+        };
+        let meta = build_meta("pin_123_000001", &doc, PinState::Visible);
+        assert_eq!(meta.pin_id, "pin_123_000001");
+        assert_eq!(meta.title, "Test");
+        assert_eq!(meta.created_at, "2026-01-01T00:00:00Z");
+        assert_eq!(meta.state, PinState::Visible);
+    }
+
+    #[test]
+    fn test_build_meta_fallback_created_at() {
+        let doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![],
+            window: None,
+            source: None,
+            created_at: None,
+        };
+        let meta = build_meta("pin_123_000001", &doc, PinState::Hidden);
+        // created_at 应回退到当前时间（非空）
+        assert!(!meta.created_at.is_empty());
+        assert_eq!(meta.state, PinState::Hidden);
+    }
+
+    // ---------- P1: 持久化与回滚测试（用 with_root 注入 tempdir） ----------
+
+    /// 辅助：构造临时 root 目录，测试结束后自动清理（含 panic 时）。
+    /// 用 tempfile::TempDir 避免 Windows SystemTime 精度低导致的并发路径冲突。
+    fn with_temp_root(f: impl FnOnce(&std::path::Path)) {
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        f(tmp.path());
+        // tmp drop 时自动清理
+    }
+
+    /// 辅助：构造最小 PinDocument。
+    fn make_doc(title: &str) -> PinDocument {
+        PinDocument {
+            version: 1,
+            title: title.to_string(),
+            blocks: vec![crate::pin::PinBlock::Markdown(crate::pin::MarkdownBlock {
+                content: "## content".to_string(),
+            })],
+            window: None,
+            source: None,
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_insert_persists_to_disk() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let pin_id = "pin_100_000001".to_string();
+            let doc = make_doc("Test Insert");
+
+            let meta = reg.insert(pin_id.clone(), doc.clone()).expect("insert ok");
+            assert_eq!(meta.pin_id, pin_id);
+            assert_eq!(meta.state, PinState::Visible);
+
+            // 内存可读
+            assert!(reg.get(&pin_id).is_some());
+            // doc 文件落盘（用 _for 版本验证 root 下的路径，不能用 production 版 pin_file_path）
+            assert!(
+                storage::pin_file_path_for(root, &pin_id).exists(),
+                "doc file should be on disk"
+            );
+            assert!(
+                storage::state_file_path_for(root).exists(),
+                "state.json should be on disk"
+            );
+        });
+    }
+
+    #[test]
+    fn test_insert_then_load_from_disk_recovers() {
+        with_temp_root(|root| {
+            // 第一次：插入一个 Pin
+            {
+                let reg = PinRegistry::with_root(root.to_path_buf());
+                reg.insert("pin_200_000001".to_string(), make_doc("First"))
+                    .expect("insert ok");
+                reg.set_state("pin_200_000001", PinState::Hidden)
+                    .expect("set_state ok");
+            }
+
+            // 第二次：新 registry 实例从同一 root 加载
+            let reg2 = PinRegistry::with_root(root.to_path_buf());
+            reg2.load_from_disk();
+
+            let list = reg2.list();
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].pin_id, "pin_200_000001");
+            // hidden 状态保留
+            assert_eq!(list[0].state, PinState::Hidden);
+        });
+    }
+
+    #[test]
+    fn test_load_from_disk_converts_visible_to_hidden() {
+        with_temp_root(|root| {
+            // 手工构造 state.json，含一个 visible 状态的 Pin
+            let state = storage::StateFile {
+                version: 1,
+                pins: vec![storage::PinMeta {
+                    pin_id: "pin_300_000001".to_string(),
+                    title: "Visible Pin".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    state: PinState::Visible,
+                    source: None,
+                    window_size: None,
+                }],
+            };
+            storage::save_state_to(root, &state).expect("save state");
+
+            // 同时写一个 pin doc，让 load_from_disk 能读到
+            storage::save_pin_doc_to(root, "pin_300_000001", &make_doc("Visible Pin"))
+                .expect("save doc");
+
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.load_from_disk();
+
+            let list = reg.list();
+            assert_eq!(list.len(), 1);
+            // visible 必须转为 hidden（重启后窗口实际不可见）
+            assert_eq!(list[0].state, PinState::Hidden);
+        });
+    }
+
+    #[test]
+    fn test_load_from_disk_missing_doc_marks_failed() {
+        with_temp_root(|root| {
+            // state.json 引用一个 Pin，但 pins/{pinId}.json 不存在
+            let state = storage::StateFile {
+                version: 1,
+                pins: vec![storage::PinMeta {
+                    pin_id: "pin_400_000001".to_string(),
+                    title: "Orphan".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    state: PinState::Hidden,
+                    source: None,
+                    window_size: None,
+                }],
+            };
+            storage::save_state_to(root, &state).expect("save state");
+
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.load_from_disk();
+
+            let list = reg.list();
+            assert_eq!(list.len(), 1);
+            // doc 缺失，标 failed
+            assert_eq!(list[0].state, PinState::Failed);
+        });
+    }
+
+    #[test]
+    fn test_load_from_disk_skips_invalid_pin_id() {
+        with_temp_root(|root| {
+            // state.json 含一个非法 pin_id（路径穿越），load_from_disk 必须跳过
+            let state = storage::StateFile {
+                version: 1,
+                pins: vec![
+                    storage::PinMeta {
+                        pin_id: "pin_500_000001".to_string(),
+                        title: "Valid".to_string(),
+                        created_at: "2026-01-01T00:00:00Z".to_string(),
+                        updated_at: "2026-01-01T00:00:00Z".to_string(),
+                        state: PinState::Hidden,
+                        source: None,
+                        window_size: None,
+                    },
+                    storage::PinMeta {
+                        pin_id: "../evil".to_string(),
+                        title: "Evil".to_string(),
+                        created_at: "2026-01-02T00:00:00Z".to_string(),
+                        updated_at: "2026-01-02T00:00:00Z".to_string(),
+                        state: PinState::Hidden,
+                        source: None,
+                        window_size: None,
+                    },
+                ],
+            };
+            storage::save_state_to(root, &state).expect("save state");
+            storage::save_pin_doc_to(root, "pin_500_000001", &make_doc("Valid")).expect("save doc");
+
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.load_from_disk();
+
+            let list = reg.list();
+            // 只加载合法的 Pin，非法的被跳过
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].pin_id, "pin_500_000001");
+        });
+    }
+
+    #[test]
+    fn test_set_state_visible_to_hidden_roundtrip() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_600_000001".to_string(), make_doc("Toggle"))
+                .expect("insert ok");
+
+            // visible → hidden
+            reg.set_state("pin_600_000001", PinState::Hidden)
+                .expect("set hidden");
+            assert_eq!(
+                reg.get_meta("pin_600_000001").unwrap().state,
+                PinState::Hidden
+            );
+
+            // hidden → visible
+            reg.set_state("pin_600_000001", PinState::Visible)
+                .expect("set visible");
+            assert_eq!(
+                reg.get_meta("pin_600_000001").unwrap().state,
+                PinState::Visible
+            );
+        });
+    }
+
+    #[test]
+    fn test_set_state_nonexistent_returns_err() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let err = reg
+                .set_state("pin_nonexistent", PinState::Hidden)
+                .unwrap_err();
+            assert!(err.contains("pin not found"));
+        });
+    }
+
+    #[test]
+    fn test_remove_deletes_pin() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_700_000001".to_string(), make_doc("To Delete"))
+                .expect("insert ok");
+            assert!(reg.get("pin_700_000001").is_some());
+
+            reg.remove("pin_700_000001").expect("remove ok");
+            assert!(reg.get("pin_700_000001").is_none());
+            assert!(reg.get_meta("pin_700_000001").is_none());
+            // doc 文件也应被删除
+            assert!(
+                !storage::pin_file_path_for(root, "pin_700_000001").exists(),
+                "doc file should be deleted after remove"
+            );
+        });
+    }
+
+    #[test]
+    fn test_remove_nonexistent_is_idempotent() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 删除不存在的 Pin 应返回 Ok（幂等）
+            assert!(reg.remove("pin_nonexistent").is_ok());
+        });
+    }
+
+    #[test]
+    fn test_remove_invalid_pin_id_returns_err() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 路径穿越 pin_id 必须拒绝
+            assert!(reg.remove("../evil").is_err());
+        });
+    }
+
+    #[test]
+    fn test_list_sorted_by_created_at_desc() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 故意按乱序插入，created_at 不同
+            let doc1 = PinDocument {
+                version: 1,
+                title: "Earlier".to_string(),
+                blocks: vec![],
+                window: None,
+                source: None,
+                created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            };
+            let doc2 = PinDocument {
+                version: 1,
+                title: "Later".to_string(),
+                blocks: vec![],
+                window: None,
+                source: None,
+                created_at: Some("2026-02-01T00:00:00Z".to_string()),
+            };
+            reg.insert("pin_800_000001".to_string(), doc1)
+                .expect("insert");
+            reg.insert("pin_800_000002".to_string(), doc2)
+                .expect("insert");
+
+            let list = reg.list();
+            assert_eq!(list.len(), 2);
+            // 降序：Later 在前
+            assert_eq!(list[0].title, "Later");
+            assert_eq!(list[1].title, "Earlier");
+        });
+    }
+
+    #[test]
+    fn test_list_recent_hidden_filters_and_truncates() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 插入 3 个 Pin：2 个 hidden，1 个 visible
+            reg.insert("pin_900_000001".to_string(), make_doc("Hidden 1"))
+                .expect("insert");
+            reg.insert("pin_900_000002".to_string(), make_doc("Hidden 2"))
+                .expect("insert");
+            reg.insert("pin_900_000003".to_string(), make_doc("Visible 1"))
+                .expect("insert");
+
+            reg.set_state("pin_900_000001", PinState::Hidden)
+                .expect("set hidden");
+            reg.set_state("pin_900_000002", PinState::Hidden)
+                .expect("set hidden");
+            // pin_900_000003 保持 visible
+
+            // 只返回 hidden，n=5 但只有 2 个 hidden
+            let recent = reg.list_recent_hidden(5);
+            assert_eq!(recent.len(), 2);
+            assert!(recent.iter().all(|m| m.state == PinState::Hidden));
+
+            // n=1 截断
+            let recent1 = reg.list_recent_hidden(1);
+            assert_eq!(recent1.len(), 1);
+        });
+    }
+
+    // ---------- P2: 错误路径 / 回滚测试 ----------
+    //
+    // 用"state.json 路径被目录占用"技巧触发 persist_state 失败：
+    // save_state_to 的 rename(tmp, state.json) 在目标是目录时会失败，
+    // 而 save_pin_doc 仍能正常写（pins/ 目录已创建，不受 state.json 冲突影响）。
+    // 这样可以精确测试"doc 写成功但 state.json 写失败"的回滚分支。
+
+    /// 辅助：在 root 下创建 state.json 目录占位，让 persist_state 的 rename 失败。
+    /// 如果 state.json 已作为文件存在（如 insert 正常写入后），先删除再建目录。
+    fn make_state_json_a_dir(root: &std::path::Path) {
+        let state_path = storage::state_file_path_for(root);
+        if state_path.exists() {
+            std::fs::remove_file(&state_path).expect("remove existing state.json");
+        }
+        // create_dir_all 确保父目录存在，不依赖外部 init_to 前置调用
+        std::fs::create_dir_all(&state_path).expect("create state.json as dir");
+    }
+
+    #[test]
+    fn test_insert_rolls_back_on_persist_failure() {
+        with_temp_root(|root| {
+            // 先正常 init（创建 pins/ 目录），再把 state.json 占为目录
+            storage::init_to(root).expect("init");
+            make_state_json_a_dir(root);
+
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let pin_id = "pin_a00_000001".to_string();
+            let result = reg.insert(pin_id.clone(), make_doc("Rollback Test"));
+
+            // insert 应返回 Err（persist_state 失败）
+            assert!(result.is_err(), "insert must fail when persist fails");
+            // 回滚：内存中不应有该 Pin
+            assert!(
+                reg.get(&pin_id).is_none(),
+                "pin must be removed from memory after rollback"
+            );
+            assert!(
+                reg.get_meta(&pin_id).is_none(),
+                "meta must be removed from memory after rollback"
+            );
+            // 回滚：doc 文件也应被删除（避免孤儿文件）
+            assert!(
+                !storage::pin_file_path_for(root, &pin_id).exists(),
+                "doc file must be deleted after rollback"
+            );
+        });
+    }
+
+    #[test]
+    fn test_set_state_rolls_back_on_persist_failure() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 先正常插入一个 Pin（state.json 此时正常写）
+            reg.insert("pin_b00_000001".to_string(), make_doc("Before Break"))
+                .expect("insert before break");
+            let original_state = reg.get_meta("pin_b00_000001").unwrap().state;
+            let original_updated_at = reg.get_meta("pin_b00_000001").unwrap().updated_at.clone();
+
+            // 破坏 state.json（占为目录），让后续 persist_state 失败
+            make_state_json_a_dir(root);
+
+            // 尝试 set_state，应失败
+            let result = reg.set_state("pin_b00_000001", PinState::Hidden);
+            assert!(result.is_err(), "set_state must fail when persist fails");
+
+            // 回滚：内存状态恢复为原值
+            let meta = reg.get_meta("pin_b00_000001").expect("pin still in memory");
+            assert_eq!(
+                meta.state, original_state,
+                "state must be rolled back after persist failure"
+            );
+            assert_eq!(
+                meta.updated_at, original_updated_at,
+                "updated_at must be rolled back after persist failure"
+            );
+        });
+    }
+
+    #[test]
+    fn test_remove_rolls_back_on_persist_failure() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 先正常插入一个 Pin
+            reg.insert("pin_c00_000001".to_string(), make_doc("To Remove"))
+                .expect("insert");
+
+            // 破坏 state.json，让 persist_state 失败
+            make_state_json_a_dir(root);
+
+            // 尝试 remove，应失败（persist 失败时把 entry 放回内存）
+            let result = reg.remove("pin_c00_000001");
+            assert!(result.is_err(), "remove must fail when persist fails");
+
+            // 回滚：Pin 仍在内存中
+            assert!(
+                reg.get("pin_c00_000001").is_some(),
+                "pin must be restored to memory after remove rollback"
+            );
+            assert!(
+                reg.get_meta("pin_c00_000001").is_some(),
+                "meta must be restored to memory after remove rollback"
+            );
+        });
+    }
+
+    #[test]
+    fn test_remove_doc_file_survives_if_state_persist_fails() {
+        // remove 的回滚只把 entry 放回内存，不重新创建 doc 文件
+        // （因为 doc 文件还没被删——remove 先 persist state 再删 doc）
+        // 所以 persist 失败时 doc 文件仍在磁盘上（这是设计预期，非 bug）
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_d00_000001".to_string(), make_doc("Doc Survives"))
+                .expect("insert");
+
+            make_state_json_a_dir(root);
+
+            let _ = reg.remove("pin_d00_000001");
+            // doc 文件仍在（remove 在 persist 失败前不会删 doc）
+            assert!(
+                storage::pin_file_path_for(root, "pin_d00_000001").exists(),
+                "doc file should still exist when state persist fails (remove deletes doc after state)"
+            );
+        });
+    }
+
+    // ---------- M4: 窗口尺寸记忆 + recreating 标志测试 ----------
+    //
+    // close_pin 命令依赖 tauri::AppHandle（get_webview_window / hide_pin_window），
+    // 无法纯单元测试。其 state 管理逻辑（set_state Hidden + emit）已被上方
+    // set_state 测试覆盖，窗口销毁属集成测试范畴。
+
+    #[test]
+    fn test_remember_window_size_success() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let pin_id = "pin_e00_000001".to_string();
+            reg.insert(pin_id.clone(), make_doc("Resize Test"))
+                .expect("insert");
+
+            // 初始无记忆尺寸
+            assert!(reg.get_meta(&pin_id).unwrap().window_size.is_none());
+
+            // 记忆尺寸
+            reg.remember_window_size(&pin_id, 500.0, 400.0)
+                .expect("remember ok");
+
+            let meta = reg.get_meta(&pin_id).unwrap();
+            let size = meta.window_size.expect("window_size should be set");
+            assert!((size.width - 500.0).abs() < f64::EPSILON);
+            assert!((size.height - 400.0).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_nonexistent_pin() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let err = reg
+                .remember_window_size("pin_e01_000001", 500.0, 400.0)
+                .unwrap_err();
+            assert!(err.contains("pin not found"));
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_invalid_size() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_e02_000001".to_string(), make_doc("Invalid Size"))
+                .expect("insert");
+
+            // 零、负数、NaN、Infinity 都应拒绝
+            assert!(reg
+                .remember_window_size("pin_e02_000001", 0.0, 400.0)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", 500.0, 0.0)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", -1.0, 400.0)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", 500.0, f64::NAN)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", f64::INFINITY, 400.0)
+                .is_err());
+
+            // 无效尺寸不应修改已有记忆
+            let meta = reg.get_meta("pin_e02_000001").unwrap();
+            assert!(
+                meta.window_size.is_none(),
+                "invalid size must not set window_size"
+            );
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_invalid_pin_id() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 路径穿越 pin_id 必须拒绝
+            assert!(reg.remember_window_size("../evil", 500.0, 400.0).is_err());
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_persists_across_load() {
+        with_temp_root(|root| {
+            {
+                let reg = PinRegistry::with_root(root.to_path_buf());
+                reg.insert("pin_e03_000001".to_string(), make_doc("Persist Size"))
+                    .expect("insert");
+                reg.remember_window_size("pin_e03_000001", 600.0, 800.0)
+                    .expect("remember");
+            }
+            // 新 registry 实例从同一 root 加载
+            let reg2 = PinRegistry::with_root(root.to_path_buf());
+            reg2.load_from_disk();
+
+            let meta = reg2.get_meta("pin_e03_000001").unwrap();
+            let size = meta
+                .window_size
+                .expect("window_size should be restored from disk");
+            assert!((size.width - 600.0).abs() < f64::EPSILON);
+            assert!((size.height - 800.0).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_rolls_back_on_persist_failure() {
+        // M1 修复验证：persist 失败时恢复旧值而非清成 None。
+        // 场景：先记忆 500x400（成功），再破坏 state.json，再记忆 600x800（失败），
+        //       旧值 500x400 应保留（而非被清成 None）。
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_e04_000001".to_string(), make_doc("Rollback Size"))
+                .expect("insert");
+
+            // 第一次记忆成功
+            reg.remember_window_size("pin_e04_000001", 500.0, 400.0)
+                .expect("first remember");
+            assert!(reg
+                .get_meta("pin_e04_000001")
+                .unwrap()
+                .window_size
+                .is_some());
+
+            // 破坏 state.json
+            make_state_json_a_dir(root);
+
+            // 第二次记忆应失败（persist 失败）
+            let err = reg
+                .remember_window_size("pin_e04_000001", 600.0, 800.0)
+                .unwrap_err();
+            assert!(err.contains("failed to save state.json"));
+
+            // M1 关键断言：旧值 500x400 应保留，而非被清成 None
+            let meta = reg.get_meta("pin_e04_000001").unwrap();
+            let size = meta
+                .window_size
+                .expect("old window_size must be preserved after rollback (M1)");
+            assert!(
+                (size.width - 500.0).abs() < f64::EPSILON,
+                "width should be old value 500"
+            );
+            assert!(
+                (size.height - 400.0).abs() < f64::EPSILON,
+                "height should be old value 400"
+            );
+        });
+    }
+
+    #[test]
+    fn test_recreating_flag_lifecycle() {
+        let reg = PinRegistry::new();
+        let pin_id = "pin_f00_000001";
+
+        // 初始无标志
+        assert!(!reg.is_recreating(pin_id));
+
+        // mark → true
+        reg.mark_recreating(pin_id);
+        assert!(reg.is_recreating(pin_id));
+
+        // unmark → false
+        reg.unmark_recreating(pin_id);
+        assert!(!reg.is_recreating(pin_id));
+    }
+
+    #[test]
+    fn test_recreating_mark_idempotent() {
+        let reg = PinRegistry::new();
+        let pin_id = "pin_f01_000001";
+
+        // 重复 mark 不报错（HashSet insert 幂等）
+        reg.mark_recreating(pin_id);
+        reg.mark_recreating(pin_id);
+        assert!(reg.is_recreating(pin_id));
+
+        // 一次 unmark 即可清除
+        reg.unmark_recreating(pin_id);
+        assert!(!reg.is_recreating(pin_id));
+    }
+
+    #[test]
+    fn test_recreating_unmark_without_mark_is_noop() {
+        let reg = PinRegistry::new();
+        // unmark 不存在的标志不报错（幂等）
+        reg.unmark_recreating("pin_f02_000001");
+        assert!(!reg.is_recreating("pin_f02_000001"));
+    }
+}

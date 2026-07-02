@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Release 工作流：tag（v0.1.0 形式）触发。
+# 产物：
+#   - Agent Pin 桌面应用 NSIS 安装包（-setup.exe）
+#   - agent-pin.exe CLI 二进制（独立压缩包）
+# 发布到 GitHub Release，标记为 prerelease（v0.x 阶段尚在 MVP）。
+#
+# 版本一致性：tag 名 v0.1.0 应与 root package.json 的 version 一致。
+# 工作流会先跑 sync-version:check 验证。
+
+jobs:
+  release:
+    name: Release (Windows)
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.0
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tag matches root version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          ROOT_VER=$(node -p "require('./package.json').version")
+          if [ "v${ROOT_VER}" != "${TAG}" ]; then
+            echo "Tag ${TAG} does not match root package.json version v${ROOT_VER}"
+            exit 1
+          fi
+          echo "Releasing version ${ROOT_VER}"
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Version sync check
+        run: node scripts/sync-version.mjs --check
+
+      - name: Build & release Tauri app (NSIS)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Agent Pin ${{ github.ref_name }}'
+          releaseBody: |
+            ## Agent Pin ${{ github.ref_name }}
+
+            Windows 安装包：下载 `-setup.exe` 双击安装。
+            CLI 二进制：下载 `agent-pin-windows-x64.zip`，解压后将 `agent-pin.exe` 放到 PATH 中。
+
+            安装包启动后监听 `http://127.0.0.1:4317`，CLI 通过该端口与桌面应用通信。
+
+            详细使用见 [README](https://github.com/${{ github.repository }}#readme) 与 [Skill 文档](skills/agent-pin/SKILL.md)。
+          releaseDraft: false
+          prerelease: true
+
+      - name: Build CLI binary (release)
+        run: cargo build --release --manifest-path packages/cli/Cargo.toml
+
+      - name: Package CLI binary
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          cd packages/cli/target/release
+          7z a "${GITHUB_WORKSPACE}/agent-pin-${VERSION}-windows-x64.zip" agent-pin.exe
+
+      - name: Generate CLI checksum
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          cd "${GITHUB_WORKSPACE}"
+          sha256sum "agent-pin-${VERSION}-windows-x64.zip" > "agent-pin-${VERSION}-windows-x64.zip.sha256"
+
+      - name: Upload CLI asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            agent-pin-*-windows-x64.zip
+            agent-pin-*-windows-x64.zip.sha256
+          fail_on_unmatched_files: true
+          prerelease: true

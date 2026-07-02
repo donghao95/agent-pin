@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# CI 工作流目标：在 Windows 上验证 lint / typecheck / Rust 编译与测试均通过。
+# 不跑 pnpm build（完整 Tauri 构建在 release.yml 中执行），避免 CI 双重构建。
+
+jobs:
+  build:
+    name: CI (Windows)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.0
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          # 只缓存 pnpm 全局 store，不缓存 node_modules（pnpm install 会基于 store 重建，缓存 node_modules 是反模式）
+          path: |
+            ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          # 不缓存根 target（根目录无 Cargo.toml，缓存无效且会污染）
+          # 各 crate 的 target 由 cargo 自身增量编译管理，跨 run 缓存收益小且易冲突
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+            packages/cli/target
+            packages/shared/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Version sync check
+        run: node scripts/sync-version.mjs --check
+
+      - name: Lint (ESLint)
+        run: pnpm lint
+
+      - name: Typecheck (tsc --noEmit)
+        run: pnpm typecheck
+
+      - name: Rust check (shared crate)
+        run: cargo check --manifest-path packages/shared/Cargo.toml --locked
+
+      - name: Rust check (CLI crate)
+        run: cargo check --manifest-path packages/cli/Cargo.toml --locked
+
+      - name: Rust check (desktop backend)
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+      - name: Rust test
+        shell: bash
+        run: |
+          cargo test --manifest-path packages/shared/Cargo.toml --locked
+          cargo test --manifest-path packages/cli/Cargo.toml --locked
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+      - name: Rust fmt check
+        shell: bash
+        run: |
+          cargo fmt --manifest-path packages/shared/Cargo.toml -- --check
+          cargo fmt --manifest-path packages/cli/Cargo.toml -- --check
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Rust clippy
+        shell: bash
+        run: |
+          cargo clippy --manifest-path packages/shared/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path packages/cli/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Install cargo-audit
+        # 用 taiki-e/install-action 从 GitHub Release 下载预编译 binary（秒级），
+        # 替代 `cargo install cargo-audit --locked`（源码编译，约 10 分钟）。
+        # taiki-e 是 Rust 生态知名维护者（cargo-hack / cargo-quickinstall），此 action
+        # 被 tokio / serde 等主流项目使用。自带 SHA256 校验，安全可靠。
+        # 若预编译不可用，自动 fallback 到 cargo-binstall → cargo install，不会比现状更差。
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Cargo audit (RustSec advisories)
+        shell: bash
+        # 项目根目录无 Cargo.toml/Cargo.lock，3 个 crate 各自维护独立 lockfile。
+        # 分别对每个 lockfile 运行 audit，确保所有依赖树均无已知漏洞。
+        # 不使用 --deny warnings：Tauri 2 在 Windows 上的间接依赖（gtk-rs / glib /
+        # unic-* / proc-macro-error）存在 unmaintained/unsound 告警，这些属于上游
+        # 维护状态，项目层面无法修复；保留对真正 vulnerability 的失败检查即可。
+        #
+        # desktop 的 audit 额外 ignore 2 个 quick-xml DoS 漏洞（RUSTSEC-2026-0194 /
+        # RUSTSEC-2026-0195）：quick-xml 经 plist 1.9.0 -> tauri-build 引入，仅在
+        # build time 解析 plist（macOS bundle 配置），不接受运行时外部输入，DoS 攻击
+        # 面为零。plist 1.9.0 已是最新版，无法带动 quick-xml 升级到 0.41。待 plist
+        # 发布支持 quick-xml 0.41 的新版本后移除 --ignore。
+        run: |
+          cargo audit --file packages/shared/Cargo.lock
+          cargo audit --file packages/cli/Cargo.lock
+          cargo audit --file apps/desktop/src-tauri/Cargo.lock \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195

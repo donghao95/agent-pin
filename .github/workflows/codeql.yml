@@ -1,0 +1,40 @@
+name: CodeQL
+
+# CodeQL 代码安全扫描，覆盖前端 JavaScript/TypeScript。
+# Rust 后端的安全防线由 ci.yml 中的 cargo-audit（依赖漏洞）+ cargo-clippy（代码质量）覆盖，
+# CodeQL for Rust 当前成熟度不足，暂不纳入，避免误报噪声。
+# 启用本工作流后，GitHub Security tab 会自动显示扫描结果。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 每周一 01:30 UTC 扫描（对应北京时间 09:30）
+    - cron: '30 1 * * 1'
+
+jobs:
+  analyze:
+    name: Analyze (JS/TS)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+          # JavaScript/TypeScript 是解释型语言，CodeQL 不需要编译即可分析
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
