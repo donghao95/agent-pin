@@ -1092,9 +1092,15 @@ mod tests {
                 .expect("insert");
 
             // 零、负数、NaN、Infinity 都应拒绝
-            assert!(reg.remember_window_size("pin_e02_000001", 0.0, 400.0).is_err());
-            assert!(reg.remember_window_size("pin_e02_000001", 500.0, 0.0).is_err());
-            assert!(reg.remember_window_size("pin_e02_000001", -1.0, 400.0).is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", 0.0, 400.0)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", 500.0, 0.0)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", -1.0, 400.0)
+                .is_err());
             assert!(reg
                 .remember_window_size("pin_e02_000001", 500.0, f64::NAN)
                 .is_err());
@@ -1156,12 +1162,11 @@ mod tests {
             // 第一次记忆成功
             reg.remember_window_size("pin_e04_000001", 500.0, 400.0)
                 .expect("first remember");
-            assert!(
-                reg.get_meta("pin_e04_000001")
-                    .unwrap()
-                    .window_size
-                    .is_some()
-            );
+            assert!(reg
+                .get_meta("pin_e04_000001")
+                .unwrap()
+                .window_size
+                .is_some());
 
             // 破坏 state.json
             make_state_json_a_dir(root);

@@ -206,11 +206,7 @@ fn close_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
 /// show 时优先用此尺寸恢复窗口。
 /// 仅前端检测到用户手动 resize 后调用，fit_pin_window_height 的自动调整不调用。
 #[tauri::command]
-fn remember_pin_size(
-    pin_id: String,
-    width: f64,
-    height: f64,
-) -> Result<(), String> {
+fn remember_pin_size(pin_id: String, width: f64, height: f64) -> Result<(), String> {
     registry::REGISTRY.remember_window_size(&pin_id, width, height)
 }
 
