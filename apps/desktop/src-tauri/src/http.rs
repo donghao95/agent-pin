@@ -25,14 +25,110 @@ use axum::{
     Router,
 };
 use serde_json::{json, Value};
+use std::path::Path as FsPath;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 use tower_http::limit::RequestBodyLimitLayer;
 
-use crate::pin::PinErrorCode;
+use crate::pin::{PinBlock, PinErrorCode};
 use crate::storage::PinState;
 
 /// 请求体最大 1MB
 const MAX_BODY: usize = 1024 * 1024;
+
+/// 复制图片到数据目录并改写 doc 中的路径。
+/// 如果文件存在且扩展名合法，复制到 ~/.agent-pin/images/ 并改写路径。
+/// 如果文件不存在，保留原路径不动（前端 onerror 显示错误块）。
+/// 扩展名合法性已由 PinDocument validate() 在调用前统一校验。
+/// 如果文件存在但无法托管，返回错误，避免 API 成功但 Pin 必然无法加载图片。
+fn copy_image_blocks_to_store(doc: &mut crate::pin::PinDocument) -> Result<(), String> {
+    let images_dir = crate::storage::images_dir();
+    copy_image_blocks_to_store_in(doc, &images_dir)
+}
+
+fn copy_image_blocks_to_store_in(
+    doc: &mut crate::pin::PinDocument,
+    images_dir: &FsPath,
+) -> Result<(), String> {
+    let mut changed = false;
+    for block in doc.blocks.iter_mut() {
+        if let PinBlock::Image(img) = block {
+            let src = FsPath::new(&img.path);
+            // 只处理绝对路径
+            if !src.is_absolute() {
+                continue;
+            }
+            // 校验扩展名
+            let ext = match src.extension().and_then(|e| e.to_str()) {
+                Some(e) => e.to_ascii_lowercase(),
+                None => continue,
+            };
+            if !crate::pin::IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+                continue;
+            }
+            // 检查文件是否存在
+            if !src.exists() {
+                continue;
+            }
+            // 检查是否已在 images 目录内（避免重复复制）
+            if let (Ok(canonical_src), Ok(canonical_store)) = (
+                std::fs::canonicalize(src),
+                std::fs::canonicalize(images_dir),
+            ) {
+                if canonical_src.starts_with(&canonical_store) {
+                    continue;
+                }
+            }
+            // 懒创建目录：只有文件存在且确实需要托管时，目录创建失败才应阻塞 POST。
+            if let Err(e) = std::fs::create_dir_all(images_dir) {
+                return Err(format!("failed to create images dir: {}", e));
+            }
+            // 生成目标路径并复制
+            let millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let counter = IMAGE_COPY_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dest = images_dir.join(format!(
+                "image_{}_{}_{}.{}",
+                millis,
+                std::process::id(),
+                counter,
+                ext
+            ));
+            match std::fs::copy(src, &dest) {
+                Ok(_) => {
+                    if let Some(dest_str) = dest.to_str() {
+                        img.path = dest_str.to_string();
+                        changed = true;
+                    } else {
+                        let _ = std::fs::remove_file(&dest);
+                        return Err(format!(
+                            "copied image destination path is not valid UTF-8: {}",
+                            dest.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "failed to copy image '{}' to '{}': {}",
+                        img.path,
+                        dest.display(),
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
+    if changed {
+        crate::pin::validate(doc).map_err(|e| e.message)?;
+    }
+    Ok(())
+}
+
+static IMAGE_COPY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Pin 总数上限。防止本地恶意进程循环创建海量 Pin 导致窗口句柄/GDI 耗尽、
 /// 内存膨胀、磁盘膨胀、state.json 全量重写阻塞 I/O（M2 DoS 防护）。
@@ -109,6 +205,17 @@ async fn create_pin(
             StatusCode::CONFLICT,
             PinErrorCode::InternalError,
             format!("pin count limit reached (max {})", MAX_PIN_COUNT),
+        ));
+    }
+
+    // 2.5. 图片托管：复制 image block 的源图片到 ~/.agent-pin/images/ 并改写路径。
+    //      文件不存在时保留原路径（前端 onerror 显示错误块）。
+    let mut doc = doc;
+    if let Err(e) = copy_image_blocks_to_store(&mut doc) {
+        return Err(err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            PinErrorCode::InternalError,
+            e,
         ));
     }
 
@@ -282,33 +389,83 @@ fn show_pin_err_response(e: crate::pin_actions::ShowPinError) -> (StatusCode, Js
     err_response(status, code, message)
 }
 
-// ---------- CSRF 防护 ----------
+// ---------- Host 白名单 + CSRF 防护 ----------
 
-/// POST 请求必须带 Content-Type: application/json，否则拒绝。
+/// 校验 Host 头是否为本地回环地址（任意端口）。
+/// 允许：127.0.0.1:<port>、localhost:<port>、[::1]:<port>。
+/// 端口号不限，支持 CLI --endpoint 自定义本地端口调试。
+/// 防 DNS rebinding 攻击（攻击者把恶意域名 DNS 解析到 127.0.0.1）。
+fn is_localhost_host(host: &str) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+
+    let (hostname, port_part) = if let Some(stripped) = host.strip_prefix('[') {
+        let Some(end) = stripped.find(']') else {
+            return false;
+        };
+        let hostname = &stripped[..end];
+        let rest = &stripped[end + 1..];
+        if rest.is_empty() {
+            (hostname, None)
+        } else if let Some(port) = rest.strip_prefix(':') {
+            (hostname, Some(port))
+        } else {
+            return false;
+        }
+    } else {
+        if host == "::1" {
+            ("::1", None)
+        } else {
+            if host.contains('[') || host.contains(']') {
+                return false;
+            }
+            match host.rsplit_once(':') {
+                Some((hostname, port)) => {
+                    if hostname.contains(':') {
+                        return false;
+                    }
+                    (hostname, Some(port))
+                }
+                None => (host, None),
+            }
+        }
+    };
+
+    if let Some(port) = port_part {
+        if port.is_empty() || port.parse::<u16>().is_err() {
+            return false;
+        }
+    }
+
+    hostname.eq_ignore_ascii_case("localhost") || hostname == "127.0.0.1" || hostname == "::1"
+}
+
+/// 所有 /api 请求都校验 Host 头（防 DNS rebinding）。
+/// POST 请求额外校验 Content-Type: application/json（防 CSRF）。
+///
 /// 浏览器对 application/json 的跨站 POST 会发 preflight（OPTIONS），
 /// 我们不响应 CORS，preflight 失败 → 实际请求不会发出。
 /// text/plain 是简单请求不发 preflight，必须拒绝（防 CSRF）。
 /// CLI 的 ureq 已显式设 Content-Type: application/json，不受影响。
-///
-/// m1 防御纵深：额外校验 Host 头，只允许 127.0.0.1:4317 和 localhost:4317。
-/// 防 DNS rebinding 攻击（攻击者把恶意域名 DNS 解析到 127.0.0.1）。
 async fn csrf_guard(req: Request, next: Next) -> Response {
-    if req.method() == Method::POST {
-        // m1：Host 头白名单校验（防御纵深，防 DNS rebinding）
-        let host = req
-            .headers()
-            .get(axum::http::header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if host != "127.0.0.1:4317" && host != "localhost:4317" {
-            return err_response(
-                StatusCode::FORBIDDEN,
-                PinErrorCode::InternalError,
-                "host not allowed".to_string(),
-            )
-            .into_response();
-        }
+    // 所有 /api 请求都校验 Host 头（防御纵深，防 DNS rebinding）
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !is_localhost_host(host) {
+        return err_response(
+            StatusCode::FORBIDDEN,
+            PinErrorCode::InternalError,
+            "host not allowed".to_string(),
+        )
+        .into_response();
+    }
 
+    // POST 请求额外校验 Content-Type
+    if req.method() == Method::POST {
         let ct = req
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
@@ -466,6 +623,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_csrf_guard_allows_custom_port() {
+        // CLI --endpoint 自定义端口：Host 白名单允许任意端口的 localhost
+        let resp =
+            send_csrf_request(Method::POST, "127.0.0.1:9999", Some("application/json")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn test_csrf_guard_allows_json_with_charset() {
         // application/json; charset=utf-8 是 RFC 7231 标准带 charset 的合法形式，
         // ureq/reqwest 默认会这样发。csrf_guard 用 starts_with 放行，此测试锁定该行为。
@@ -493,16 +658,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_csrf_guard_rejects_bad_host() {
-        // m1 防御纵深：非白名单 Host 拒绝（防 DNS rebinding）
+    async fn test_csrf_guard_rejects_bad_host_post() {
+        // 非白名单 Host 拒绝 POST（防 DNS rebinding）
         let resp = send_csrf_request(Method::POST, "evil.com:4317", Some("application/json")).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
-    async fn test_csrf_guard_skips_get() {
-        // GET 请求不校验 Host 和 Content-Type（CSRF 只针对状态变更的 POST）
+    async fn test_csrf_guard_rejects_bad_host_get() {
+        // 非白名单 Host 也拒绝 GET（所有 /api 路由都校验 Host）
         let resp = send_csrf_request(Method::GET, "evil.com", None).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_allows_get_good_host() {
+        // 合法 Host 的 GET 放行
+        let resp = send_csrf_request(Method::GET, "127.0.0.1:4317", None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_allows_get_localhost_custom_port() {
+        // localhost 自定义端口的 GET 放行
+        let resp = send_csrf_request(Method::GET, "localhost:8080", None).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -511,5 +690,265 @@ mod tests {
         // 空 Host（头缺失时 unwrap_or("")）也必须拒绝
         let resp = send_csrf_request(Method::POST, "", Some("application/json")).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_csrf_guard_rejects_empty_host_get() {
+        // 空 Host 的 GET 也必须拒绝
+        let resp = send_csrf_request(Method::GET, "", None).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ---------- is_localhost_host ----------
+
+    #[test]
+    fn test_is_localhost_host_valid() {
+        assert!(is_localhost_host("127.0.0.1:4317"));
+        assert!(is_localhost_host("localhost:4317"));
+        assert!(is_localhost_host("LOCALHOST:4317"));
+        assert!(is_localhost_host("127.0.0.1:9999"));
+        assert!(is_localhost_host("localhost:80"));
+        assert!(is_localhost_host("[::1]:4317"));
+    }
+
+    #[test]
+    fn test_is_localhost_host_no_port() {
+        assert!(is_localhost_host("127.0.0.1"));
+        assert!(is_localhost_host("localhost"));
+        assert!(is_localhost_host("::1"));
+    }
+
+    #[test]
+    fn test_is_localhost_host_rejects_external() {
+        assert!(!is_localhost_host("evil.com:4317"));
+        assert!(!is_localhost_host("192.168.1.1:4317"));
+        assert!(!is_localhost_host("example.com"));
+        assert!(!is_localhost_host(""));
+    }
+
+    #[test]
+    fn test_is_localhost_host_rejects_bad_port_syntax() {
+        assert!(!is_localhost_host("127.0.0.1:abc"));
+        assert!(!is_localhost_host("127.0.0.1:"));
+        assert!(!is_localhost_host("localhost:99999"));
+        assert!(!is_localhost_host("[::1]:abc"));
+        assert!(!is_localhost_host("[::1]:"));
+        assert!(!is_localhost_host("[::1]junk"));
+        assert!(!is_localhost_host("[::1"));
+    }
+
+    // ---------- copy_image_blocks_to_store ----------
+
+    use crate::pin::{ImageBlock, MarkdownBlock, PinDocument};
+    use std::fs;
+
+    /// 辅助：构造临时目录
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "agent-pin-http-test-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn test_copy_image_copies_existing_file() {
+        let tmp = temp_dir("copy-existing");
+        let images_dir = tmp.join("images");
+        let src = tmp.join("test.png");
+        fs::write(&src, b"fake png").unwrap();
+
+        let mut doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![PinBlock::Image(ImageBlock {
+                path: src.to_string_lossy().to_string(),
+                caption: None,
+            })],
+            window: None,
+            source: None,
+            created_at: None,
+        };
+
+        copy_image_blocks_to_store_in(&mut doc, &images_dir).unwrap();
+
+        if let PinBlock::Image(img) = &doc.blocks[0] {
+            assert!(
+                FsPath::new(&img.path).starts_with(&images_dir),
+                "path should be rewritten to images dir, got: {}",
+                img.path
+            );
+            assert!(img.path.ends_with(".png"), "should keep png extension");
+            assert!(fs::metadata(&img.path).is_ok(), "copied file should exist");
+        } else {
+            panic!("expected image block");
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_copy_image_preserves_path_for_missing_file() {
+        let tmp = temp_dir("missing-file");
+        let images_dir = tmp.join("images");
+        let mut doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![PinBlock::Image(ImageBlock {
+                path: "/nonexistent/path/missing.png".to_string(),
+                caption: None,
+            })],
+            window: None,
+            source: None,
+            created_at: None,
+        };
+
+        copy_image_blocks_to_store_in(&mut doc, &images_dir).unwrap();
+
+        // 文件不存在，路径应保留原样
+        if let PinBlock::Image(img) = &doc.blocks[0] {
+            assert_eq!(img.path, "/nonexistent/path/missing.png");
+        } else {
+            panic!("expected image block");
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_copy_image_skips_non_image_extension() {
+        let tmp = temp_dir("skip-non-image");
+        let images_dir = tmp.join("images");
+        let src = tmp.join("test.bmp");
+        fs::write(&src, b"fake bmp").unwrap();
+
+        let mut doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![PinBlock::Image(ImageBlock {
+                path: src.to_string_lossy().to_string(),
+                caption: None,
+            })],
+            window: None,
+            source: None,
+            created_at: None,
+        };
+
+        copy_image_blocks_to_store_in(&mut doc, &images_dir).unwrap();
+
+        // 非图片扩展名，路径应保留原样
+        if let PinBlock::Image(img) = &doc.blocks[0] {
+            assert_eq!(img.path, src.to_string_lossy().to_string());
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_copy_image_skips_relative_path() {
+        let tmp = temp_dir("relative-path");
+        let images_dir = tmp.join("images");
+        let mut doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![PinBlock::Image(ImageBlock {
+                path: "relative/path.png".to_string(),
+                caption: None,
+            })],
+            window: None,
+            source: None,
+            created_at: None,
+        };
+
+        copy_image_blocks_to_store_in(&mut doc, &images_dir).unwrap();
+
+        // 相对路径不处理
+        if let PinBlock::Image(img) = &doc.blocks[0] {
+            assert_eq!(img.path, "relative/path.png");
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_copy_image_only_affects_image_blocks() {
+        let tmp = temp_dir("non-image-blocks");
+        let images_dir = tmp.join("images");
+        let mut doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![
+                PinBlock::Markdown(MarkdownBlock {
+                    content: "## Hello".to_string(),
+                }),
+                PinBlock::Status(crate::pin::StatusBlock {
+                    level: Some("info".to_string()),
+                    text: "status".to_string(),
+                }),
+            ],
+            window: None,
+            source: None,
+            created_at: None,
+        };
+
+        copy_image_blocks_to_store_in(&mut doc, &images_dir).unwrap();
+
+        // 非 image block 不受影响
+        assert_eq!(doc.blocks.len(), 2);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_copy_image_returns_error_when_images_dir_cannot_be_created() {
+        let tmp = temp_dir("images-dir-file");
+        let src = tmp.join("test.png");
+        let images_dir = tmp.join("images");
+        fs::write(&src, b"fake png").unwrap();
+        fs::write(&images_dir, b"not a directory").unwrap();
+
+        let mut doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![PinBlock::Image(ImageBlock {
+                path: src.to_string_lossy().to_string(),
+                caption: None,
+            })],
+            window: None,
+            source: None,
+            created_at: None,
+        };
+
+        let err = copy_image_blocks_to_store_in(&mut doc, &images_dir).unwrap_err();
+        assert!(err.contains("failed to create images dir"));
+        if let PinBlock::Image(img) = &doc.blocks[0] {
+            assert_eq!(img.path, src.to_string_lossy().to_string());
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_missing_image_does_not_require_images_dir() {
+        let tmp = temp_dir("missing-image-blocked-dir");
+        let src = tmp.join("missing.png");
+        let images_dir = tmp.join("images");
+        fs::write(&images_dir, b"not a directory").unwrap();
+
+        let mut doc = PinDocument {
+            version: 1,
+            title: "Test".to_string(),
+            blocks: vec![PinBlock::Image(ImageBlock {
+                path: src.to_string_lossy().to_string(),
+                caption: None,
+            })],
+            window: None,
+            source: None,
+            created_at: None,
+        };
+
+        copy_image_blocks_to_store_in(&mut doc, &images_dir).unwrap();
+        if let PinBlock::Image(img) = &doc.blocks[0] {
+            assert_eq!(img.path, src.to_string_lossy().to_string());
+        }
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

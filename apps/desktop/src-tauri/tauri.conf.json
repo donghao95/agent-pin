@@ -16,7 +16,7 @@
       "capabilities": ["default"],
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": ["$HOME/.agent-pin/images/**/*"]
       }
     }
   },

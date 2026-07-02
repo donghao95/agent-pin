@@ -197,7 +197,7 @@ error
 
 ## 7. agent-pin push
 
-推送完整 Pin JSON。用于混合内容，例如 Markdown + Image。
+推送完整 Pin JSON。Agent 自动创建 Pin 时默认使用该命令；它可以覆盖 Markdown、图片、状态和混合内容。
 
 ```bash
 agent-pin --json push --file ./pin.json
@@ -229,14 +229,20 @@ Get-Content -Encoding UTF8 .\pin.json | agent-pin --json push --file -
 }
 ```
 
-路径和托管规则：
+图片使用建议：
 
-- `agent-pin push --file ./dir/pin.json`：JSON 内 image 相对路径按 `./dir/` 解析。
-- `agent-pin push --file -`：JSON 内 image 相对路径按当前工作目录解析。
-- 找到图片后复制到 `~/.agent-pin/images/`，PinDocument 中写入副本绝对路径。
-- 源图片不存在时返回 `IMAGE_NOT_FOUND`，不会创建 Pin。
+- 使用 `push --file ./pin.json` 时，建议把图片放在 `pin.json` 旁边，或在 JSON 中写清楚相对位置。
+- 使用 `push --file -` 时，确保命令从包含图片的工作目录运行；不确定时用绝对路径。
+- 创建成功后，Agent Pin 会保存图片副本；源图片移动或删除不影响已创建的 Pin。
+- 源图片不存在时返回 `IMAGE_NOT_FOUND`，不会创建 Pin。此时检查路径、工作目录或改用绝对路径。
 
-这样 Pin JSON 和旁边的图片可以一起移动；Pin 创建成功后，即使源图片移动或删除，Pin 仍能从 Agent Pin 数据目录中的副本恢复。
+预期成功输出：
+
+```json
+{"ok":true,"pinId":"pin_1782801843675_717272"}
+```
+
+桌面应出现一个新的 Pin。没有出现时先运行 `agent-pin --json health`，再检查命令返回的 `error.code` 和 `error.message`。
 
 ---
 
@@ -317,5 +323,5 @@ Agent 使用 CLI 时应尽量：
 - 保持 Pin 内容简短。
 - 不把完整聊天记录 pin 出来。
 - 优先 pin 结论、风险、状态、图片结果。
-- 短状态用 `status`，可读摘要用 `markdown`，图片用 `image`，混合内容用 `push`。
-- 不创建 choice，因为 MVP 暂不支持交互。
+- 自动创建 Pin 时优先用 `push --file`；`markdown`、`image`、`status` 作为用户明确要求或手写调试时的快捷命令。
+- 图片路径错误时先检查工作目录，必要时改用绝对路径。

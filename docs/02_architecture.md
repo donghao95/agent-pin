@@ -188,10 +188,9 @@ image path 规则：
 
 assetProtocol scope 安全说明：
 
-- `tauri.conf.json` 中 `assetProtocol.scope` 当前为 `["**"]`，允许加载系统任意路径图片。
-- CLI 已将 Agent 常规入口收敛到 `~/.agent-pin/images/` 副本路径，避免 Pin 长期依赖源文件。
-- 仍保留宽 scope 是为了兼容直接 HTTP API 的绝对路径契约；未来若要收窄 scope，需要同步调整 HTTP API 为上传/托管语义。
-- 风险：本地任意用户进程仍可通过 HTTP 接口触发任意路径图片加载（受 `127.0.0.1` 监听 + 本地用户权限约束）。
+- `tauri.conf.json` 中 `assetProtocol.scope` 已收窄为 `["$HOME/.agent-pin/images/**/*"]`，只允许加载 Agent Pin 图片托管目录中的文件。
+- CLI 和 HTTP API 统一将图片复制到 `~/.agent-pin/images/` 后再持久化/渲染，不依赖源文件继续留在原位置。
+- HTTP `POST /api/pins` 收到 image block 时，如果文件存在且扩展名合法，后端自动复制到 `~/.agent-pin/images/` 并改写路径；如果文件不存在，保留原路径，前端 `<img>` onerror 显示错误块；如果文件存在但托管失败，返回 500，不创建 Pin。
 
 ### Phase 2-C：CLI 创建 Pin
 
