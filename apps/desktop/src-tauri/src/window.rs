@@ -200,8 +200,8 @@ pub fn fit_pin_window_height(
     // 1. 校验 pin_id 格式（防路径遍历、防保留 label "manager"）
     validate_pin_id(pin_id)?;
 
-    // 2. 校验 content_height 合理性
-    if !content_height.is_finite() || content_height < 0.0 || content_height > FIT_HEIGHT_MAX {
+    // 2. 校验 content_height 合理性（!is_finite 排除 NaN/Infinity，再检查范围）
+    if !content_height.is_finite() || !(0.0..=FIT_HEIGHT_MAX).contains(&content_height) {
         return Err(format!(
             "invalid content_height: {} (expected 0..={})",
             content_height, FIT_HEIGHT_MAX
