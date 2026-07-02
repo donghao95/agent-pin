@@ -20,17 +20,17 @@ Codex、Claude Code、Trae、Cursor 或其他 Agent 可以把重要结果推送�
 </p>
 
 <p align="center">
-  <a href="#preview">Preview</a> ·
-  <a href="#why">Why</a> ·
-  <a href="#install">Install</a> ·
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#for-agents">For Agents</a> ·
-  <a href="#development">Development</a>
+  <a href="#预览">预览</a> ·
+  <a href="#为什么需要">为什么需要</a> ·
+  <a href="#安装">安装</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#给-agent-用的说明">给 Agent 用的说明</a> ·
+  <a href="#开发">开发</a>
 </p>
 
 ---
 
-## Preview
+## 预览
 
 <p align="center">
   <img src="docs/assets/screenshot-hero.webp" alt="Agent Pin preview" width="100%">
@@ -42,7 +42,7 @@ Codex、Claude Code、Trae、Cursor 或其他 Agent 可以把重要结果推送�
 
 ---
 
-## Why
+## 为什么需要
 
 AI Agent 越来越会干活，但结果经常散落在各种地方：
 
@@ -73,7 +73,7 @@ Agent 产出重要结果
 
 ---
 
-## Install
+## 安装
 
 ### 推荐方式：让你的 Agent 帮你安装
 
@@ -116,7 +116,7 @@ agent-pin --json health
 
 ---
 
-## Quick Start
+## 快速开始
 
 创建一个 `pin.json`：
 
@@ -160,7 +160,7 @@ docs/04_cli.md
 
 ---
 
-## What can be pinned
+## 可以 pin 什么
 
 Agent Pin 当前支持三类内容：
 
@@ -210,7 +210,7 @@ Agent Pin 当前支持三类内容：
 
 ---
 
-## For Agents
+## 给 Agent 用的说明
 
 Agent 自动创建 Pin 时，推荐统一使用：
 
@@ -245,7 +245,7 @@ skills/agent-pin/SKILL.md
 
 ---
 
-## Features
+## 功能特性
 
 - 一个 Pin 一个独立桌面窗口
 - 支持 Markdown / Image / Status
@@ -261,7 +261,7 @@ skills/agent-pin/SKILL.md
 
 ---
 
-## Current Status
+## 当前状态
 
 Agent Pin 当前处于 MVP 阶段。
 
@@ -291,7 +291,7 @@ Agent Pin 当前处于 MVP 阶段。
 
 ---
 
-## Project Structure
+## 项目结构
 
 ```text
 agent-pin/
@@ -305,7 +305,7 @@ agent-pin/
 
 ---
 
-## Docs
+## 文档
 
 ```text
 docs/00_README.md
@@ -323,7 +323,7 @@ skills/agent-pin/SKILL.md     Agent 使用规则
 
 ---
 
-## Development
+## 开发
 
 前置要求：
 
@@ -360,7 +360,7 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 
 ---
 
-## Security
+## 安全
 
 Agent Pin 是本地优先工具。
 
