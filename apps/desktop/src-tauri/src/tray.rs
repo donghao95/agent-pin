@@ -295,7 +295,7 @@ fn handle_check_update(app: &AppHandle) {
                         .title("Agent Pin 有更新")
                         .show(move |ok_pressed| {
                             if ok_pressed {
-                                // 用 tauri-plugin-shell 打开浏览器
+                                // 用 std::process::Command 打开浏览器
                                 if let Err(e) = open_release_url(&app_for_dialog, &url) {
                                     eprintln!("[agent-pin] open release url: {}", e);
                                 }

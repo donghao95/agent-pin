@@ -273,13 +273,49 @@ MVP 中 status 是静态展示，不做实时更新。
 默认行为：
 
 - 默认置顶
-- 可拖动
+- 可拖动（整个窗口区域可拖动，view-mode 下生效）
 - 可缩放
 - 可关闭
 - 内容可滚动
+- 窗口高度按内容自适应（`height: "auto"` 时），有初始最大高度
 - 图片自动适配宽度
 - 关闭不删除数据（关闭 = hidden，可恢复）
 - 多个 Pin 级联排列，避免完全重叠
+
+### 9.1 无标题栏 + 交互模式（2026-07-02 引入）
+
+Pin 窗口没有独立标题栏，title 融入内容首行（`.pin-title-inline`），关闭按钮悬浮在右上角（hover 显示）。
+
+两种交互模式通过 class 切换：
+
+- **view-mode**（默认）：
+  - 整个窗口可拖动（`onMouseDown` → `startDragging()`）
+  - `user-select: none`（不可选中文字）
+  - 双击 → 进入 select-mode
+  - 右击 → 弹出上下文菜单（只读模式 / 隐藏 Pin），`preventDefault` 抑制原生网页菜单
+  - 链接点击用系统默认浏览器打开（`invoke open_external_url` → opener plugin；协议白名单 http/https/mailto）
+  - ESC → 关闭窗口（hidden，可恢复）
+- **select-mode**（只读选择模式）：
+  - `user-select: text`（可滑动选择文本复制）
+  - 不触发 startDragging（允许文本选择）
+  - 图片可右键复制
+  - 顶部显示提示条"只读模式 · 按 ESC 退出"
+  - 右上角 × 按钮语义变为"退出只读模式"（模式嵌套：从哪进从哪出，不跳级关闭窗口）
+  - ESC → 退回 view-mode（优先于关闭窗口）
+
+MVP 边界：select-mode 只读，永不支持修改 Pin 内容并保存（见 `docs/roadmap.md`）。命名用 select 而非 edit，避免误导未来开发者加入"用户编辑保存"逻辑。
+
+### 9.2 自适应高度（2026-07-02 引入）
+
+`height: "auto"` 的实际行为：
+
+- 窗口创建时使用保守初始高度 200px（避免大窗口→缩小的视觉跳变）
+- 前端渲染完成后测量 `.pin-body` 的 `scrollHeight`
+- 通过 `invoke fit_pin_window_height(pinId, contentHeight)` 通知后端
+- 后端 clamp 到 `[100, 屏幕高度 * 0.7]` 后 `set_size` 调整窗口高度
+- 图片加载完成后触发重新测量
+- 内容超出最大高度时，底部显示渐变透明暗示（`.pin-root.show-fade::after`）
+- 用户滚动到底部时移除渐变，让最后一行内容清晰可见
 
 默认尺寸：
 
@@ -297,15 +333,26 @@ MVP 中 status 是静态展示，不做实时更新。
 - 最小高度：100
 - 默认宽度：420
 - 最大默认高度：屏幕高度的 70%
+- `height: "auto"` 初始高度：200px（前端测量后自适应）
+- `height: 数值` 直接使用指定值（向后兼容）
+
+窗口尺寸记忆（2026-07-02 引入）：
+
+- 用户手动 resize 窗口后，尺寸持久化到 `PinMeta.window_size`（`state.json`）
+- 重新打开该 Pin 时，优先使用记忆尺寸（记忆 > `doc.window` > 默认值）
+- 用户手动 resize 后，自动适配（`fit_pin_window_height`）不再覆盖用户选择的尺寸
+- 后端 `fit_pin_window_height` 守卫：`PinMeta.window_size` 存在时直接返回，不 `set_size`
+- 前端 `userResized` 标志：用户 resize 后不再调用 `fit_pin_window_height`（只更新溢出状态）
+- 最小尺寸（280×100）由 `min_inner_size` 强制，不受内容影响
 
 窗口类型：
 
-- **Pin 窗口**（label 是 pinId）：`decorations(false)` + `shadow(true)` + 自定义轻标题栏 + `alwaysOnTop=true` + `skipTaskbar=true`
+- **Pin 窗口**（label 是 pinId）：`decorations(false)` + `shadow(true)` + 无标题栏（title 融入内容）+ `alwaysOnTop=true` + `skipTaskbar=true`
 - **管理界面窗口**（label 固定为 `manager`）：`decorations(true)` 系统装饰 + `resizable(true)` + 880×620 + min 640×400
 
 窗口行为：
 
-- Pin 窗口关闭 = destroy + state=hidden（可恢复）
+- Pin 窗口关闭 = `invoke close_pin` → 同步 `set_state(hidden)` + emit `pins:changed` + destroy 窗口（可恢复，管理页立即刷新）
 - 管理界面窗口关闭 = hide（缩回托盘，窗口实例保留）；托盘"打开管理界面"重新 show
 - 应用启动自动打开管理界面窗口
 - 只有托盘"退出 Agent Pin"才退出 app

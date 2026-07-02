@@ -3,8 +3,9 @@
 // 职责：
 // - 为每个 Pin 创建独立的 Tauri WebviewWindow
 // - 多 Pin 级联排列，避免完全重叠（右上角出生，向左下偏移 24px）
-// - 应用自定义轻标题栏（decorations=false，前端自己画标题栏）
+// - 无系统标题栏（decorations=false），title 融入内容首行，整窗可拖动
 // - hide_pin_window：销毁窗口（幂等），用于 hide 路由和 show 路由清理孤儿窗口
+// - fit_pin_window_height：前端渲染后测量内容高度，回流调整窗口高度（自适应）
 //
 // 窗口 URL 只携带 pinId，不携带完整 PinDocument。
 // 前端通过 invoke(get_pin_document, pinId) 获取渲染数据。
@@ -12,43 +13,70 @@
 // Phase 2-B：show 路由复用 create_pin_window（从 registry 读 doc 重建窗口）。
 // 窗口位置不持久化：用户拖动后的位置丢失，show 时重新级联。
 //
-// 契约来源：docs/05_ui_style.md §4、docs/01_product_spec.md §12
+// 契约来源：docs/05_ui_style.md §4、docs/01_product_spec.md §9/§12
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::pin::{PinDocument, PinHeight, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
+use crate::storage::validate_pin_id;
 
 /// 默认窗口宽度
 const DEFAULT_WIDTH: f64 = 420.0;
 /// 默认窗口高度（会在屏幕高度的 70% 内限制）
 const DEFAULT_HEIGHT: f64 = 600.0;
+/// height="auto" 时的初始保守高度。
+/// 选 200px 而非 600px：避免内容很少时出现"大窗口→缩小"的视觉跳变。
+/// 前端渲染后会通过 fit_pin_window_height 回流到实际内容高度。
+const AUTO_INITIAL_HEIGHT: f64 = 200.0;
 /// 级联偏移量（每个新窗口相对上一个偏移 24px）
 const CASCADE_OFFSET: f64 = 24.0;
 /// 右上角留白
 const MARGIN: f64 = 40.0;
 /// 窗口高度上限比例（屏幕高度的 70%）
 const MAX_HEIGHT_RATIO: f64 = 0.7;
+/// fit_pin_window_height 接收的 content_height 合理上限（与 validate 的 MAX_WINDOW_DIMENSION 对齐）
+const FIT_HEIGHT_MAX: f64 = 100_000.0;
 
 /// 为 Pin 创建独立桌面窗口。
 /// 调用方需确保 label（pin_id）不冲突：show 路由应先调 hide_pin_window 清理孤儿窗口。
+///
+/// 尺寸优先级（高 → 低）：
+/// 1. 用户记忆尺寸（PinMeta.window_size，用户手动 resize 后持久化）
+/// 2. PinDocument.window 配置（Agent 通过 API/CLI 指定）
+/// 3. 默认值（DEFAULT_WIDTH × DEFAULT_HEIGHT，或 auto 时 AUTO_INITIAL_HEIGHT）
+///
+/// 记忆尺寸优先的理由：用户手动调整后的尺寸是最贴近用户习惯的，应尊重。
+/// 若用户未调整过（window_size=None），回退到 Agent 配置或默认值。
 pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Result<(), String> {
     let label = pin_id.to_string();
     // URL 只带 pinId，数据走 invoke
     let url = format!("index.html?pinId={}", pin_id);
 
     let win_cfg = doc.window.as_ref();
-    let width = win_cfg
-        .and_then(|w| w.width)
-        .map(|w| w as f64)
-        .unwrap_or(DEFAULT_WIDTH);
     let always_on_top = win_cfg.and_then(|w| w.always_on_top).unwrap_or(true);
 
-    // height：数值直接用，"auto" 或未指定用 DEFAULT_HEIGHT。
-    let requested_height = win_cfg
-        .and_then(|w| w.height.as_ref())
-        .map(|h| match h {
-            PinHeight::Number(n) => *n as f64,
-            PinHeight::Auto(_) => DEFAULT_HEIGHT,
+    // 从 registry 读取用户记忆尺寸（优先级最高）
+    let remembered = crate::registry::REGISTRY
+        .get_meta(pin_id)
+        .and_then(|m| m.window_size);
+
+    // width 优先级：记忆 > doc.window > 默认
+    let width = remembered
+        .as_ref()
+        .map(|s| s.width)
+        .or_else(|| win_cfg.and_then(|w| w.width).map(|w| w as f64))
+        .unwrap_or(DEFAULT_WIDTH);
+
+    // height 优先级：记忆 > doc.window > 默认
+    // 记忆尺寸直接用（用户已确认过这个高度）；doc.window 的 auto 用保守初始高度
+    let requested_height = remembered
+        .as_ref()
+        .map(|s| s.height)
+        .or_else(|| {
+            win_cfg.and_then(|w| w.height.as_ref()).map(|h| match h {
+                PinHeight::Number(n) => *n as f64,
+                PinHeight::Auto(_) => AUTO_INITIAL_HEIGHT,
+            })
         })
         .unwrap_or(DEFAULT_HEIGHT);
 
@@ -140,4 +168,90 @@ fn get_screen_size(app: &AppHandle) -> Option<(f64, f64)> {
     let screen_w = monitor.size().width as f64 / scale;
     let screen_h = monitor.size().height as f64 / scale;
     Some((screen_w, screen_h))
+}
+
+/// 前端渲染后调用：根据内容实际高度调整 Pin 窗口高度（自适应）。
+///
+/// 流程：前端渲染完成 / 图片加载后测量 `.pin-body` 的 scrollHeight，
+/// 通过 invoke 传 content_height 到后端，后端 clamp 后 set_size。
+///
+/// 记忆尺寸优先：若 PinMeta.window_size 存在（用户手动 resize 过），直接返回 Ok(false)，
+/// 不覆盖用户选择的尺寸。这是"用户尺寸 > 自动适配"优先级的后端守卫，
+/// 前端也通过 userResized 标志避免调用此函数，但后端守卫是单一事实源，
+/// 确保即使前端逻辑有漏洞也不会覆盖用户记忆尺寸。
+///
+/// 校验：
+/// - pin_id 格式（防路径遍历，复用 storage::validate_pin_id）
+/// - content_height 在 [0, FIT_HEIGHT_MAX] 范围（防恶意传入超大值导致 set_size 异常）
+/// - 窗口必须存在且是 Pin 窗口（label 以 pin_ 开头，防误操作 manager 窗口）
+///
+/// clamp 策略：
+/// - 下限：MIN_WINDOW_HEIGHT（100，与 min_inner_size 对齐）
+/// - 上限：屏幕高度 * 0.7（与 create_pin_window 的 MAX_HEIGHT_RATIO 一致）
+/// - 无显示器信息时只应用下限，不 clamp 上限（极端环境兜底）
+///
+/// 返回 true 表示实际调整了高度，false 表示无需调整（有记忆尺寸、content_height 无效或窗口不存在）。
+/// 错误返回 Err，不静默吞错（与 AGENTS.md 一致）。
+pub fn fit_pin_window_height(
+    app: &AppHandle,
+    pin_id: &str,
+    content_height: f64,
+) -> Result<bool, String> {
+    // 1. 校验 pin_id 格式（防路径遍历、防保留 label "manager"）
+    validate_pin_id(pin_id)?;
+
+    // 2. 校验 content_height 合理性
+    if !content_height.is_finite() || content_height < 0.0 || content_height > FIT_HEIGHT_MAX {
+        return Err(format!(
+            "invalid content_height: {} (expected 0..={})",
+            content_height, FIT_HEIGHT_MAX
+        ));
+    }
+
+    // 3. 获取窗口，校验是 Pin 窗口（label 以 pin_ 开头）
+    //    防止误调整 manager 窗口高度（manager 有自己的尺寸策略）
+    let window = app
+        .get_webview_window(pin_id)
+        .ok_or_else(|| format!("window not found: {}", pin_id))?;
+    if !pin_id.starts_with("pin_") {
+        return Err(format!(
+            "fit_pin_window_height can only be called on pin windows, got label: {}",
+            pin_id
+        ));
+    }
+
+    // 4. 记忆尺寸守卫：用户手动 resize 过的 Pin 不做自动适配。
+    //    前端也通过 userResized 标志在调用前拦截，但后端是单一事实源，
+    //    确保即使前端有竞态（remember_pin_size 尚未落盘时 measureAndFit 被触发）也不会覆盖用户尺寸。
+    if let Some(meta) = crate::registry::REGISTRY.get_meta(pin_id) {
+        if meta.window_size.is_some() {
+            return Ok(false);
+        }
+    }
+
+    // 5. clamp 高度
+    let min_h = MIN_WINDOW_HEIGHT as f64;
+    let target_height = match get_screen_size(app) {
+        Some((_, screen_h)) => {
+            let max_h = screen_h * MAX_HEIGHT_RATIO;
+            content_height.max(min_h).min(max_h)
+        }
+        None => content_height.max(min_h), // 无显示器信息，只应用下限
+    };
+
+    // 6. 获取当前窗口宽度（保持宽度不变，只调高度）
+    let current_size = window
+        .inner_size()
+        .map_err(|e| format!("failed to get inner_size: {}", e))?;
+    let scale = window
+        .scale_factor()
+        .map_err(|e| format!("failed to get scale_factor: {}", e))?;
+    let current_w = current_size.width as f64 / scale;
+
+    // 7. set_size（LogicalSize：与 create_pin_window 的 inner_size 语义一致）
+    window
+        .set_size(LogicalSize::new(current_w, target_height))
+        .map_err(|e| format!("failed to set_size: {}", e))?;
+
+    Ok(true)
 }

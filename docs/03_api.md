@@ -348,7 +348,7 @@ POST /api/pins/hide-all
 - status block 的 `text` 必须非空
 - status block 的 `level` 若存在，必须是 `info`/`success`/`warning`/`error` 之一
 - `window.width` 若存在，必须在 `280..=100_000` 范围内（与窗口 `min_inner_size` 对齐，小于 280 返回 `INVALID_PIN_DOCUMENT`）
-- `window.height` 若为数字，必须在 `100..=100_000` 范围内（与窗口 `min_inner_size` 对齐，保证标题栏可见）
+- `window.height` 若为数字，必须在 `100..=100_000` 范围内（与窗口 `min_inner_size` 对齐，保证内容区最小可读高度）
 
 ---
 

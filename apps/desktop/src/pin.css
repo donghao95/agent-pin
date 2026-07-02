@@ -6,6 +6,12 @@
  *   元素级圆角（按钮、代码块、滚动条等）保留，不影响窗口合成。
  *   详见 docs/05_ui_style.md §4 Phase 1 视觉退化说明。
  *
+ * 无标题栏设计（2026-07-02 重构）：
+ *   - 去掉独立标题栏，title 融入 .pin-body 首行（.pin-title-inline）
+ *   - 关闭按钮悬浮在右上角（.pin-close-floating），hover 显示
+ *   - 整窗可拖动（view-mode），双击/右击进入只读选择模式（select-mode）
+ *   - 详见 docs/feature/window-adaptive-and-titlebar-redesign.md
+ *
  * 全局重置（* / html / body / #root）在 index.css，Manager 窗口也共用（M10）。
  */
 
@@ -14,37 +20,34 @@
   flex-direction: column;
   height: 100vh;
   background: #ffffff;
+  position: relative; /* 给关闭按钮和渐变层定位 */
+  overflow: hidden;
   /* Phase 1 不做 CSS 圆角/阴影/毛玻璃。
      圆角/阴影由 DWM 通过 shadow(true) 提供（Win11 有，Win10 退化直角）。
      详见 docs/05_ui_style.md §4 Phase 1 视觉退化说明。 */
-  overflow: hidden;
 }
 
-/* ---------- 标题栏 ---------- */
+/* ---------- 交互模式 ---------- */
 
-.pin-titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 36px;
-  padding: 0 6px 0 12px;
-  background: #f8f9fa;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+/* view-mode（默认）：不可选中文字，整窗可拖动 */
+.pin-root.view-mode {
   user-select: none;
-  flex-shrink: 0;
+  cursor: default;
 }
 
-.pin-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #1f2329;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
+/* select-mode（只读选择模式）：可选中文字复制，不触发拖动 */
+.pin-root.select-mode {
+  user-select: text;
+  cursor: text;
 }
 
-.pin-close {
+/* ---------- 悬浮关闭按钮 ---------- */
+
+.pin-close-floating {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 10;
   border: none;
   background: transparent;
   color: #646a73;
@@ -53,12 +56,36 @@
   cursor: pointer;
   padding: 4px 8px;
   border-radius: 4px;
-  transition: background 0.12s, color 0.12s;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.12s, color 0.12s;
 }
 
-.pin-close:hover {
+/* hover .pin-root 时显示关闭按钮 */
+.pin-root:hover .pin-close-floating,
+.pin-root:focus-within .pin-close-floating {
+  opacity: 1;
+}
+
+/* select-mode 下始终显示关闭按钮（避免用户被困在 select-mode） */
+.pin-root.select-mode .pin-close-floating {
+  opacity: 1;
+}
+
+.pin-close-floating:hover {
   background: rgba(245, 63, 63, 0.1);
   color: #f04134;
+}
+
+/* ---------- select-mode 提示条 ---------- */
+
+.pin-mode-hint {
+  padding: 4px 40px 4px 12px; /* right 留出 × 按钮空间，避免文字和 × 重叠 */
+  background: #f0f5ff;
+  color: #1677ff;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(22, 119, 255, 0.1);
+  flex-shrink: 0;
+  user-select: none;
 }
 
 /* ---------- 内容区 ---------- */
@@ -67,10 +94,48 @@
   flex: 1;
   overflow-y: auto;
   padding: 16px 18px;
+  position: relative;
 }
+
+/* 渐变透明暗示：内容溢出且未滚动到底部时，底部叠一层白色渐变。
+   用 .pin-root.show-fade::after 而非 mask-image：
+   - mask-image 会同时遮罩滚动条，影响交互
+   - ::after 叠层只遮挡内容，不影响滚动条，且可通过 pointer-events: none 透传点击
+   show-fade class 由前端根据 isOverflow && !isAtBottom 动态添加到 .pin-root */
+.pin-root.show-fade::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  /* 右侧留出滚动条宽度（6px + padding），避免遮住滚动条 */
+  right: 8px;
+  height: 28px;
+  background: linear-gradient(to bottom, transparent, #ffffff);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* ---------- title 融入内容首行 ---------- */
+
+.pin-title-inline {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2329;
+  margin-bottom: 10px;
+  line-height: 1.4;
+  word-break: break-word;
+  /* 长标题不抢视觉，但仍清晰可读 */
+}
+
+/* ---------- Block 间距 ---------- */
 
 .pin-block + .pin-block {
   margin-top: 12px;
+}
+
+/* 第一个 block 紧跟 title，不需要额外 margin-top（title 已有 margin-bottom） */
+.pin-body > .pin-block:first-of-type {
+  margin-top: 0;
 }
 
 /* ---------- Markdown ---------- */
@@ -321,4 +386,41 @@
 
 .pin-body::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.25);
+}
+
+/* ---------- 右键上下文菜单 ---------- */
+
+.pin-context-menu {
+  position: absolute;
+  z-index: 100;
+  min-width: 140px;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  padding: 4px 0;
+  user-select: none;
+}
+
+.pin-context-menu-item {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: #1f2329;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.pin-context-menu-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.pin-context-menu-divider {
+  height: 1px;
+  background: rgba(0, 0, 0, 0.06);
+  margin: 2px 0;
 }

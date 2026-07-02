@@ -25,6 +25,7 @@
 | 05 | [05_ui_style.md](05_ui_style.md) | Pin 窗口与管理界面视觉风格、Windows WebView2 退化说明 |
 | 06 | [06_phase_plan.md](06_phase_plan.md) | Phase 1/2 分期、MVP 验收标准、后续路线 |
 | 07 | [07_skill_design.md](07_skill_design.md) | Skill 设计原则（给外部 Agent 用的 `skills/agent-pin/SKILL.md` 的设计说明） |
+| - | [roadmap.md](roadmap.md) | 未来功能路线（未落地、不在 MVP 范围） |
 
 辅助资源（不在 docs/ 下，但属于文档体系）：
 
