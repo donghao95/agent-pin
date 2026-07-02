@@ -182,22 +182,21 @@ image path 规则：
 
 - HTTP 接收的 `path` 必须是绝对路径。
 - 扩展名必须是 PNG/JPG/JPEG/WebP/GIF 之一（`ImageUnsupported` 错误）。
-- 不校验文件存在性：desktop 不知道 Agent cwd，前端 `<img>` onerror 处理。
-- 相对路径解析在 Phase 2-C CLI 实现：CLI 把相对路径转绝对再 POST。
+- HTTP/desktop 不校验文件存在性：desktop 不知道 Agent cwd，直接 HTTP 调用的坏路径由前端 `<img>` onerror 显示错误块。
+- CLI 是 Agent 优先入口，会先把图片复制到 `~/.agent-pin/images/` 再 POST 副本绝对路径。`image --path` 按当前工作目录解析源图片，`push --file ./pin.json` 按 JSON 文件所在目录解析源图片，`push --file -` 按当前工作目录解析源图片。
 - 直接用 curl 测试时，调用者需传绝对路径。
 
 assetProtocol scope 安全说明：
 
 - `tauri.conf.json` 中 `assetProtocol.scope` 当前为 `["**"]`，允许加载系统任意路径图片。
-- 这是 MVP 功能需要：Agent 通过 HTTP 传入任意绝对路径，前端 `convertFileSrc(path)` 直接走 Tauri asset protocol，无需先复制文件。
-- 收窄 scope 到 `~/.agent-pin/images/**` 会破坏 docs/01_product_spec.md §8 "image path 必须是绝对路径" 的 MVP 契约。
-- 风险：本地任意用户进程均可通过 HTTP 接口触发任意路径图片加载（受 `127.0.0.1` 监听 + 本地用户权限约束）。
-- Roadmap：未来若需收窄 scope，CLI 先把图片复制到 `~/.agent-pin/images/` 下再传本地路径，前端只引用该目录。记为 roadmap，不在 MVP 实现。
+- CLI 已将 Agent 常规入口收敛到 `~/.agent-pin/images/` 副本路径，避免 Pin 长期依赖源文件。
+- 仍保留宽 scope 是为了兼容直接 HTTP API 的绝对路径契约；未来若要收窄 scope，需要同步调整 HTTP API 为上传/托管语义。
+- 风险：本地任意用户进程仍可通过 HTTP 接口触发任意路径图片加载（受 `127.0.0.1` 监听 + 本地用户权限约束）。
 
 ### Phase 2-C：CLI 创建 Pin
 
 ```text
-agent-pin markdown --title "PR 审查结果" --file review.md
+agent-pin --json markdown --title "PR 审查结果" --file review.md
   ↓
 CLI 读取 review.md
   ↓

@@ -66,7 +66,7 @@ Phase 2 补齐完整 MVP 能力。拆分为 4 个子阶段，按顺序推进。
 - 一个 Pin 可以包含多个 block 混排
 - Markdown 支持标题、列表、引用、代码块、链接、Markdown 表格
 - 图片路径不存在时，在 Pin 内显示错误块，不崩溃
-- image block 的 `path` 必须是绝对路径（相对路径解析留给 Phase 2-C CLI 实现）
+- image block 的 `path` 必须是绝对路径（相对路径解析和图片托管留给 Phase 2-C CLI 实现）
 
 暂不做：历史、持久化、托盘扩展、CLI、show/hide/hide-all、GET /api/pins。
 
@@ -109,8 +109,11 @@ Phase 2 补齐完整 MVP 能力。拆分为 4 个子阶段，按顺序推进。
 - `agent-pin push --file ./pin.json`
 - `agent-pin list`
 - `agent-pin show <pinId>`
+- `agent-pin hide <pinId>`
 - `agent-pin hide-all`
-- CLI 把相对路径转绝对路径再 POST 给 HTTP（解决 image path 相对于 Agent cwd 的问题）
+- `agent-pin --json <command>` 供 Agent 稳定解析输出
+- `--file -` 从 stdin 读取 markdown 或 Pin JSON
+- CLI 把图片复制到 `~/.agent-pin/images/` 再 POST 副本绝对路径给 HTTP：`image --path` 按当前工作目录解析源图片，`push --file ./pin.json` 按 JSON 文件所在目录解析源图片，`push --file -` 按当前工作目录解析源图片。
 
 CLI 底层调用 `http://127.0.0.1:4317`，不复制业务逻辑。
 

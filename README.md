@@ -68,13 +68,14 @@ cargo build --release
 ### 通过 CLI（推荐 Agent 使用）
 
 ```bash
-agent-pin health
-agent-pin markdown --title "PR 审查结果" --text "## 结论\n通过"
-agent-pin image --title "效果图" --path ./render.png
-agent-pin status --title "构建状态" --level success --text "构建通过"
-agent-pin list
-agent-pin show <pinId>
-agent-pin hide-all
+agent-pin --json health
+agent-pin --json markdown --title "PR 审查结果" --text "## 结论\n通过"
+agent-pin --json image --title "效果图" --path ./render.png
+agent-pin --json status --title "构建状态" --level success --text "构建通过"
+agent-pin --json list
+agent-pin --json show <pinId>
+agent-pin --json hide <pinId>
+agent-pin --json hide-all
 ```
 
 完整 CLI 说明见 [docs/04_cli.md](docs/04_cli.md)。
