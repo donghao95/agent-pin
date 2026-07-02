@@ -246,7 +246,9 @@ HTTP 请求体总大小上限为 1 MB（`03_api.md` §4）。
 
 支持：本地 PNG、JPG/JPEG、WebP、GIF。
 
-`path` 必须是绝对路径。相对路径解析在 CLI 实现（CLI 把相对路径转绝对再 POST，见 `04_cli.md` §5/§7）。直接通过 HTTP 测试时需传绝对路径。
+`path` 必须是绝对路径。直接通过 HTTP 测试时需传绝对路径。
+
+CLI 作为 Agent 优先入口会额外做图片托管：`agent-pin image` 和 `agent-pin push` 会先把源图片复制到 `~/.agent-pin/images/`，再把副本绝对路径写入 PinDocument 并 POST。这样 Pin 关闭后恢复或应用重启后，不依赖原始图片文件仍在原位置。
 
 图片路径不存在时，不应导致应用崩溃，应在 Pin 内显示错误块。
 

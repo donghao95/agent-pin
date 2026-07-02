@@ -342,9 +342,10 @@ POST /api/pins/hide-all
 - `blocks` 必须存在且至少一个 block
 - block type 必须是 `markdown`、`image` 或 `status`（未知 type 在反序列化阶段被拒绝，返回 `INVALID_JSON`）
 - markdown block 的 `content` 必须非空
-- image block 的 `path` 必须非空且为绝对路径（相对路径解析由 Phase 2-C CLI 处理）
+- image block 的 `path` 必须非空且为绝对路径（相对路径解析和图片托管由 CLI 处理）
 - image block 的 `path` 扩展名必须是 PNG/JPG/JPEG/WebP/GIF 之一（否则 `IMAGE_UNSUPPORTED`）
 - image block 的文件存在性不校验：desktop 不知道 Agent cwd，前端 `<img>` onerror 显示错误块
+- 通过 CLI 创建 image/mixed Pin 时，CLI 会先校验源图片存在并复制到 `~/.agent-pin/images/`，再 POST 副本绝对路径；直接调用 HTTP API 时调用方自行保证路径稳定性
 - status block 的 `text` 必须非空
 - status block 的 `level` 若存在，必须是 `info`/`success`/`warning`/`error` 之一
 - `window.width` 若存在，必须在 `280..=100_000` 范围内（与窗口 `min_inner_size` 对齐，小于 280 返回 `INVALID_PIN_DOCUMENT`）
