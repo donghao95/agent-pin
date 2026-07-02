@@ -86,12 +86,17 @@ agent-pin markdown --title "结论" --text "第一版应该做成 Tauri 桌面 P
 
 ```bash
 --width 420                   # 可选，范围 280..=100_000（默认 420）
---height 360                  # 可选，范围 100..=100_000 或 "auto"（默认 auto，按内容自适应高度）
+--height 360                  # 可选，范围 100..=100_000 或 "auto"（默认 auto）
 --no-always-on-top
 --agent codex
 --workspace TryCue
 --task "PR Review"
 ```
+
+`--height` 行为：
+
+- `"auto"`（默认）：窗口初始高度 200px，前端渲染后测量内容高度自适应调整，上限为屏幕高度的 70%。内容超出时底部渐变透明暗示。
+- 数值（如 `360`）：直接使用指定高度，仍受屏幕高度 70% 上限约束。
 
 ---
 

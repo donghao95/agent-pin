@@ -19,14 +19,14 @@
 //
 // 契约来源：docs/02_architecture.md §3/§5、docs/06_phase_plan.md Phase 2-B
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use once_cell::sync::{Lazy, OnceCell};
 use tauri::{AppHandle, Emitter};
 
 use crate::pin::PinDocument;
-use crate::storage::{self, PinMeta, PinState, StateFile};
+use crate::storage::{self, PinMeta, PinState, StateFile, WindowSize};
 
 // ---------- AppHandle 持有 + 事件广播 ----------
 //
@@ -88,6 +88,11 @@ pub struct PinRegistry {
     /// 测试用 root：Some 时所有 I/O 写入该目录，None 时走 storage::data_dir()。
     /// production 代码用 new()（root=None），测试用 with_root(tempdir)。
     root: Option<std::path::PathBuf>,
+    /// 正在重建窗口的 pin_id 集合。
+    /// show_pin 重建窗口时，cleanup 旧窗口会触发 Destroyed 事件。
+    /// 用此标志区分"重建中的 cleanup"和"用户正常关闭"，避免 Destroyed 事件误覆盖新窗口 state。
+    /// 替代旧方案中依赖 get_webview_window 时序判断（Tauri 2 Destroyed 触发时窗口可能未注销，返回 Some 误判）。
+    recreating: Mutex<HashSet<String>>,
 }
 
 impl PinRegistry {
@@ -95,6 +100,7 @@ impl PinRegistry {
         Self {
             inner: Mutex::new(HashMap::new()),
             root: None,
+            recreating: Mutex::new(HashSet::new()),
         }
     }
 
@@ -105,6 +111,7 @@ impl PinRegistry {
         Self {
             inner: Mutex::new(HashMap::new()),
             root: Some(root),
+            recreating: Mutex::new(HashSet::new()),
         }
     }
 
@@ -331,6 +338,82 @@ impl PinRegistry {
         pins
     }
 
+    // ---------- 窗口重建标志 ----------
+    //
+    // show_pin 重建窗口时，cleanup 旧窗口会触发 Destroyed 事件。
+    // Destroyed 事件需要区分"重建中的 cleanup"（跳过 state 更新）和"用户正常关闭"（设 Hidden）。
+    // 旧方案用 get_webview_window(pin_id).is_some() 判断，但 Tauri 2 的 Destroyed 事件触发时
+    // 窗口可能还未从内部管理器注销，返回 Some（正在销毁的窗口本身），导致正常关闭也被误判为重建，
+    // 跳过 set_state(Hidden)，不 emit pins:changed，管理页不刷新。
+    //
+    // 新方案用显式标志：show_pin 重建前 mark_recreating，重建完成 unmark_recreating，
+    // Destroyed 事件检查 is_recreating。不依赖 Tauri 内部时序，架构更可靠。
+
+    /// 标记 pin_id 正在重建窗口。show_pin 重建前调用。
+    pub fn mark_recreating(&self, pin_id: &str) {
+        self.recreating
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pin_id.to_string());
+    }
+
+    /// 清除 pin_id 的重建标志。show_pin 重建完成（成功或失败）后调用。
+    pub fn unmark_recreating(&self, pin_id: &str) {
+        self.recreating
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(pin_id);
+    }
+
+    /// 检查 pin_id 是否正在重建窗口。Destroyed 事件中调用。
+    pub fn is_recreating(&self, pin_id: &str) -> bool {
+        self.recreating
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(pin_id)
+    }
+
+    // ---------- 窗口尺寸记忆 ----------
+    //
+    // 用户手动 resize 窗口后，持久化尺寸到 PinMeta.window_size。
+    // show 时优先用记忆尺寸恢复窗口，而非 doc.window 或默认值。
+    // fit_pin_window_height 的自动调整不调用此方法（只记录用户主动 resize）。
+
+    /// 记录用户手动调整后的窗口尺寸（逻辑像素）。
+    /// 更新 PinMeta.window_size + 持久化 state.json。
+    /// 不 emit pins:changed：尺寸记忆不影响管理页列表显示（列表不展示尺寸）。
+    pub fn remember_window_size(
+        &self,
+        pin_id: &str,
+        width: f64,
+        height: f64,
+    ) -> Result<(), String> {
+        storage::validate_pin_id(pin_id)?;
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return Err(format!(
+                "invalid window size: {}x{} (expected positive finite)",
+                width, height
+            ));
+        }
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = inner
+            .get_mut(pin_id)
+            .ok_or_else(|| format!("pin not found: {}", pin_id))?;
+        // M1：保存旧值，persist 失败时恢复旧值而非清成 None。
+        // 原实现清成 None 会丢失之前的记忆尺寸（如用户先 resize 到 500x400，再 resize 到
+        // 600x800 时 persist 失败，会把记忆清空，下次打开用默认尺寸，丢失 500x400）。
+        let old_window_size = entry.meta.window_size.clone();
+        entry.meta.window_size = Some(WindowSize { width, height });
+        if let Err(e) = self.persist_state(&inner) {
+            // 回滚：恢复旧值（None 或之前的 WindowSize）
+            if let Some(entry) = inner.get_mut(pin_id) {
+                entry.meta.window_size = old_window_size;
+            }
+            return Err(format!("failed to save state.json: {}", e));
+        }
+        Ok(())
+    }
+
     /// 启动时从磁盘加载历史 Pin。
     /// - 读取 state.json
     /// - 对每个 meta，加载对应的 pins/{pinId}.json
@@ -438,6 +521,7 @@ fn build_meta(pin_id: &str, doc: &PinDocument, state: PinState) -> PinMeta {
         updated_at: now,
         state,
         source: doc.source.clone(),
+        window_size: None, // 新建 Pin 无记忆尺寸，首次 show 时由 fit 或 doc.window 决定
     }
 }
 
@@ -612,6 +696,7 @@ mod tests {
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                     state: PinState::Visible,
                     source: None,
+                    window_size: None,
                 }],
             };
             storage::save_state_to(root, &state).expect("save state");
@@ -643,6 +728,7 @@ mod tests {
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                     state: PinState::Hidden,
                     source: None,
+                    window_size: None,
                 }],
             };
             storage::save_state_to(root, &state).expect("save state");
@@ -671,6 +757,7 @@ mod tests {
                         updated_at: "2026-01-01T00:00:00Z".to_string(),
                         state: PinState::Hidden,
                         source: None,
+                        window_size: None,
                     },
                     storage::PinMeta {
                         pin_id: "../evil".to_string(),
@@ -679,6 +766,7 @@ mod tests {
                         updated_at: "2026-01-02T00:00:00Z".to_string(),
                         state: PinState::Hidden,
                         source: None,
+                        window_size: None,
                     },
                 ],
             };
@@ -955,5 +1043,193 @@ mod tests {
                 "doc file should still exist when state persist fails (remove deletes doc after state)"
             );
         });
+    }
+
+    // ---------- M4: 窗口尺寸记忆 + recreating 标志测试 ----------
+    //
+    // close_pin 命令依赖 tauri::AppHandle（get_webview_window / hide_pin_window），
+    // 无法纯单元测试。其 state 管理逻辑（set_state Hidden + emit）已被上方
+    // set_state 测试覆盖，窗口销毁属集成测试范畴。
+
+    #[test]
+    fn test_remember_window_size_success() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let pin_id = "pin_e00_000001".to_string();
+            reg.insert(pin_id.clone(), make_doc("Resize Test"))
+                .expect("insert");
+
+            // 初始无记忆尺寸
+            assert!(reg.get_meta(&pin_id).unwrap().window_size.is_none());
+
+            // 记忆尺寸
+            reg.remember_window_size(&pin_id, 500.0, 400.0)
+                .expect("remember ok");
+
+            let meta = reg.get_meta(&pin_id).unwrap();
+            let size = meta.window_size.expect("window_size should be set");
+            assert!((size.width - 500.0).abs() < f64::EPSILON);
+            assert!((size.height - 400.0).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_nonexistent_pin() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            let err = reg
+                .remember_window_size("pin_e01_000001", 500.0, 400.0)
+                .unwrap_err();
+            assert!(err.contains("pin not found"));
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_invalid_size() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_e02_000001".to_string(), make_doc("Invalid Size"))
+                .expect("insert");
+
+            // 零、负数、NaN、Infinity 都应拒绝
+            assert!(reg
+                .remember_window_size("pin_e02_000001", 0.0, 400.0)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", 500.0, 0.0)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", -1.0, 400.0)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", 500.0, f64::NAN)
+                .is_err());
+            assert!(reg
+                .remember_window_size("pin_e02_000001", f64::INFINITY, 400.0)
+                .is_err());
+
+            // 无效尺寸不应修改已有记忆
+            let meta = reg.get_meta("pin_e02_000001").unwrap();
+            assert!(
+                meta.window_size.is_none(),
+                "invalid size must not set window_size"
+            );
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_invalid_pin_id() {
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            // 路径穿越 pin_id 必须拒绝
+            assert!(reg.remember_window_size("../evil", 500.0, 400.0).is_err());
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_persists_across_load() {
+        with_temp_root(|root| {
+            {
+                let reg = PinRegistry::with_root(root.to_path_buf());
+                reg.insert("pin_e03_000001".to_string(), make_doc("Persist Size"))
+                    .expect("insert");
+                reg.remember_window_size("pin_e03_000001", 600.0, 800.0)
+                    .expect("remember");
+            }
+            // 新 registry 实例从同一 root 加载
+            let reg2 = PinRegistry::with_root(root.to_path_buf());
+            reg2.load_from_disk();
+
+            let meta = reg2.get_meta("pin_e03_000001").unwrap();
+            let size = meta
+                .window_size
+                .expect("window_size should be restored from disk");
+            assert!((size.width - 600.0).abs() < f64::EPSILON);
+            assert!((size.height - 800.0).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_remember_window_size_rolls_back_on_persist_failure() {
+        // M1 修复验证：persist 失败时恢复旧值而非清成 None。
+        // 场景：先记忆 500x400（成功），再破坏 state.json，再记忆 600x800（失败），
+        //       旧值 500x400 应保留（而非被清成 None）。
+        with_temp_root(|root| {
+            let reg = PinRegistry::with_root(root.to_path_buf());
+            reg.insert("pin_e04_000001".to_string(), make_doc("Rollback Size"))
+                .expect("insert");
+
+            // 第一次记忆成功
+            reg.remember_window_size("pin_e04_000001", 500.0, 400.0)
+                .expect("first remember");
+            assert!(reg
+                .get_meta("pin_e04_000001")
+                .unwrap()
+                .window_size
+                .is_some());
+
+            // 破坏 state.json
+            make_state_json_a_dir(root);
+
+            // 第二次记忆应失败（persist 失败）
+            let err = reg
+                .remember_window_size("pin_e04_000001", 600.0, 800.0)
+                .unwrap_err();
+            assert!(err.contains("failed to save state.json"));
+
+            // M1 关键断言：旧值 500x400 应保留，而非被清成 None
+            let meta = reg.get_meta("pin_e04_000001").unwrap();
+            let size = meta
+                .window_size
+                .expect("old window_size must be preserved after rollback (M1)");
+            assert!(
+                (size.width - 500.0).abs() < f64::EPSILON,
+                "width should be old value 500"
+            );
+            assert!(
+                (size.height - 400.0).abs() < f64::EPSILON,
+                "height should be old value 400"
+            );
+        });
+    }
+
+    #[test]
+    fn test_recreating_flag_lifecycle() {
+        let reg = PinRegistry::new();
+        let pin_id = "pin_f00_000001";
+
+        // 初始无标志
+        assert!(!reg.is_recreating(pin_id));
+
+        // mark → true
+        reg.mark_recreating(pin_id);
+        assert!(reg.is_recreating(pin_id));
+
+        // unmark → false
+        reg.unmark_recreating(pin_id);
+        assert!(!reg.is_recreating(pin_id));
+    }
+
+    #[test]
+    fn test_recreating_mark_idempotent() {
+        let reg = PinRegistry::new();
+        let pin_id = "pin_f01_000001";
+
+        // 重复 mark 不报错（HashSet insert 幂等）
+        reg.mark_recreating(pin_id);
+        reg.mark_recreating(pin_id);
+        assert!(reg.is_recreating(pin_id));
+
+        // 一次 unmark 即可清除
+        reg.unmark_recreating(pin_id);
+        assert!(!reg.is_recreating(pin_id));
+    }
+
+    #[test]
+    fn test_recreating_unmark_without_mark_is_noop() {
+        let reg = PinRegistry::new();
+        // unmark 不存在的标志不报错（幂等）
+        reg.unmark_recreating("pin_f02_000001");
+        assert!(!reg.is_recreating("pin_f02_000001"));
     }
 }

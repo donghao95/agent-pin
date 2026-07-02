@@ -59,7 +59,7 @@ Phase 1 托盘边界：只表示应用存活 + `Quit Agent Pin`，不做 Pin 历
 - `tray.rs` — 系统托盘菜单 + 事件处理
 - `updater.rs` — 更新检查（GitHub API + 24h 缓存）
 - `window.rs` — Pin 窗口创建/销毁
-- `lib.rs` — 应用入口 + invoke 命令 + setup hook
+- `lib.rs` — 应用入口 + invoke 命令（get_pin_document / list_pins / show_pin / hide_pin / hide_all_pins / delete_pin / open_data_dir / check_for_updates / fit_pin_window_height / close_pin / remember_pin_size / open_external_url）+ setup hook + on_window_event
 
 ### packages/cli
 
@@ -96,10 +96,68 @@ curl POST /api/pins
   ↓
 Desktop 校验 PinDocument
   ↓
-创建独立 Pin 窗口
+创建独立 Pin 窗口（初始保守高度 200px，height="auto" 时）
   ↓
 前端渲染 Markdown
+  ↓
+前端测量 .pin-body scrollHeight
+  ↓
+invoke fit_pin_window_height(pinId, contentHeight)
+  ↓
+后端 clamp 到 [100, 屏幕高度*0.7] → set_size 调整窗口高度
 ```
+
+### 窗口自适应高度 + 尺寸记忆（2026-07-02 引入）
+
+`height: "auto"` 的自适应链路（修复文档已承诺但未实现的契约缺口）：
+
+```text
+窗口创建（AUTO_INITIAL_HEIGHT=200px，避免大窗口→缩小的视觉跳变）
+  ↓
+前端 useEffect / 图片 onLoad 触发 measureAndFit
+  ↓
+requestAnimationFrame + 50ms 防抖（避免频繁 set_size 抖动）
+  ↓
+测量 .pin-body.scrollHeight + 检测溢出
+  ↓
+userResized 标志检查：用户已手动 resize → 跳过 fit，只更新溢出状态
+  ↓
+invoke fit_pin_window_height(pinId, contentHeight)
+  ↓
+后端校验 pin_id 格式 + content_height 范围 + 窗口是 Pin 窗口
+  ↓
+记忆尺寸守卫：PinMeta.window_size 存在 → 返回 Ok(false)，不 set_size
+  ↓
+clamp：max(content_height, 100) min(screen_h * 0.7)
+  ↓
+window.set_size(LogicalSize) 调整高度（宽度保持不变）
+```
+
+窗口尺寸记忆链路：
+
+```text
+用户手动拖动窗口边缘 resize
+  ↓
+onResize 事件：programResizing=false → 判定为用户 resize
+  ↓
+置 userResized=true（后续 measureAndFit 不再调 fit）
+  ↓
+300ms 防抖后 invoke remember_pin_size(pinId, width, height)
+  ↓
+registry.remember_window_size：校验 + 更新 PinMeta.window_size + 持久化 state.json
+  ↓
+重新打开时 create_pin_window 优先用记忆尺寸（记忆 > doc.window > 默认）
+```
+
+关键约束：
+
+- `fit_pin_window_height` 只接受 label 以 `pin_` 开头的窗口，防误操作 manager 窗口。
+- `content_height` 必须在 [0, 100_000] 范围，防恶意传入超大值。
+- `fit_pin_window_height` 在 `PinMeta.window_size` 存在时返回 `Ok(false)`（记忆尺寸守卫，不覆盖用户选择）。
+- 前端 `programResizing` 标志：`measureAndFit` 调 invoke 前置 true，invoke 返回后延迟 150ms 重置（覆盖 set_size → resize 事件传播）。
+- 前端 `userResized` 标志：用户 resize 后置 true，`measureAndFit` 跳过 invoke（只更新溢出状态）。后端守卫是双重保护。
+- 错误返回 Err，不静默吞错（与 AGENTS.md 一致）。
+- 渐变透明暗示由前端 CSS `.pin-root.show-fade::after` 实现，`showFade = isOverflow && !isAtBottom`，滚动到底部时移除渐变。
 
 ### Phase 2-A：image block 渲染
 
@@ -162,31 +220,39 @@ Phase 2-B 有三套入口触发 Pin 状态变更，它们的状态更新和事�
 | HTTP `/api/pins/{pinId}/hide` | `set_state(hidden)` | registry emit `pins:changed` | |
 | HTTP `/api/pins/hide-all` | 遍历 visible 逐个 `set_state_quiet(hidden)`，循环结束统一 emit 一次 | registry emit `pins:changed` ×1 | 批量用 quiet 避免 N 次托盘重建 |
 | invoke `show_pin` / `hide_pin` / `hide_all_pins` / `delete_pin` | 同 HTTP 对应路由 | 同 HTTP 对应路由 | 管理界面按钮触发 |
+| invoke `close_pin`（ESC / 关闭按钮） | 同步 `set_state(hidden)` + emit + destroy 窗口 | registry emit `pins:changed` | 不依赖 Destroyed 时序，管理页立即刷新 |
+| invoke `remember_pin_size` | 更新 `PinMeta.window_size` + 持久化 | 无（纯数据更新，不影响列表） | 用户手动 resize 后 300ms 防抖调用 |
 | 托盘快恢菜单点击 | `show_pin_by_id` 内 `set_state(visible)`，失败回滚 | registry emit `pins:changed` | |
-| 窗口关闭按钮 → `WindowEvent::Destroyed` | `on_window_event` 检测到后 `set_state(hidden)` | registry emit `pins:changed` | 只在 state==visible 时更新，避免与 HTTP hide 重复 |
+| `WindowEvent::Destroyed`（异常兜底） | `on_window_event` 检测：`is_recreating` → 跳过；state==visible → `set_state(hidden)` | registry emit `pins:changed` | 正常关闭时 state 已是 hidden（close_pin 已处理），守卫跳过 |
 
-关键约束：`window.rs create_pin_window` 要求 label（pinId）不冲突。所有 show 入口在调 `create_pin_window` 前必须先调 `hide_pin_window` 清理可能的孤儿窗口。
+关键约束：`window.rs create_pin_window` 要求 label（pinId）不冲突。所有 show 入口在调 `create_pin_window` 前必须先调 `hide_pin_window` 清理可能的孤儿窗口。`show_pin` 重建窗口前 `mark_recreating(pin_id)`，防止 cleanup 旧窗口触发的 Destroyed 事件误覆盖新窗口 state。
 
 ### Phase 2-B：关闭 Pin
 
 ```text
-用户点 Pin 窗口关闭按钮 / POST /api/pins/{pinId}/hide / 托盘"隐藏全部"
+用户按 ESC / 点 Pin 窗口关闭按钮
   ↓
-窗口 destroy（WindowEvent::Destroyed 触发）
+前端 invoke close_pin(pinId)
   ↓
-lib.rs on_window_event 检测到 Destroyed：
-  - 若 label == "manager" 忽略
-  - 若 registry 中该 Pin 当前 state == visible，则 set_state(hidden)
-  - 若已是 hidden（HTTP/invoke hide 主动触发，先于事件回调执行），不重复更新
+后端 close_pin 命令（同步）：
+  - 若 state 已 hidden，幂等返回 Ok
+  - set_state(hidden) → state.json 更新 + registry emit pins:changed
+  - hide_pin_window（destroy 窗口）
   ↓
-state.json 更新 state=hidden, updatedAt=now
+Destroyed 事件触发：state 已 hidden → 守卫跳过（不重复 emit）
   ↓
-registry emit `pins:changed`
-  ↓
+管理界面 listen 收到 pins:changed → 立即刷新列表
 托盘 listen 收到事件 → refresh() 重建菜单（该 Pin 进入最近 5 hidden 列表）
-管理界面 listen 收到事件 → 刷新列表
   ↓
 管理界面仍保留记录
+
+异常路径（窗口崩溃等，未经过 close_pin）：
+  ↓
+Destroyed 事件触发：is_recreating=false 且 state==visible
+  ↓
+on_window_event 兜底 set_state(hidden) + emit pins:changed
+  ↓
+管理界面/托盘刷新
 ```
 
 ### Phase 2-B：重新打开 Pin
@@ -274,7 +340,7 @@ pin_<timestamp_ms>_<6位随机数字>
 
 窗口类型：
 
-- **Pin 窗口**（label 是 pinId）：`decorations(false)` + `shadow(true)` + 自定义轻标题栏 + `alwaysOnTop=true` + `skipTaskbar=true`
+- **Pin 窗口**（label 是 pinId）：`decorations(false)` + `shadow(true)` + 无标题栏（title 融入内容首行）+ `alwaysOnTop=true` + `skipTaskbar=true`
 - **管理界面窗口**（label 固定为 `manager`）：`decorations(true)` 系统装饰 + `resizable(true)` + 880×620 + min 640×400
 
 窗口行为差异：

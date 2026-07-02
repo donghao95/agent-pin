@@ -83,17 +83,22 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
         .get(pin_id)
         .ok_or_else(|| ShowPinError::NotFound(format!("doc missing for {}", pin_id)))?;
 
+    // 检测是否有旧窗口需要 cleanup。
+    // 有旧窗口时，cleanup 会触发 Destroyed 事件，需要 mark_recreating 防止
+    // Destroyed handler 误把新窗口的 state 设为 Hidden。
+    // 旧方案用 get_webview_window(pin_id).is_some() 在 Destroyed 中判断，
+    // 但 Tauri 2 Destroyed 触发时窗口可能未注销，返回 Some 误判（导致正常关闭也不刷新）。
+    // 新方案用显式 recreating 标志，Destroyed 中检查 is_recreating 后 unmark。
+    let had_window = app.get_webview_window(pin_id).is_some();
+    if had_window {
+        crate::registry::REGISTRY.mark_recreating(pin_id);
+    }
+
     match mode {
         ShowPinMode::Sync => {
             // Sync 模式：cleanup + create + set_state(Visible) 同步执行。
-            // 安全性不依赖"不 yield"——HTTP 调用方在 tokio worker 线程，主线程会并发处理
-            // cleanup 触发的 Destroyed 事件。真正安全的原因：
-            // 1. 正常路径（show hidden Pin）：state==Hidden，Destroyed handler 的
-            //    `if meta.state == Visible` 守卫跳过，不会误设 Hidden。
-            // 2. 重建路径（state==Visible 但窗口异常）：Destroyed handler 可能把 state
-            //    设为 Hidden，但后续 set_state(Visible) 会覆盖回 Visible，最终一致。
-            // 3. Destroyed handler 的 C1 守卫（get_webview_window 检查）在 create_pin_window
-            //    成功后会跳过 state 更新（新窗口已存在）。
+            // 安全性：recreating 标志确保 cleanup 触发的 Destroyed 事件跳过 state 更新。
+            // Destroyed 事件在 is_recreating=true 时 unmark + return，不覆盖 set_state(Visible)。
             if let Err(e) = crate::window::hide_pin_window(app, pin_id) {
                 eprintln!("[agent-pin] show_pin cleanup for {}: {}", pin_id, e);
             }
@@ -116,26 +121,33 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
             // 1. is_still_visible 依赖 state==Visible 判断是否应继续创建窗口，
             //    若 hide_pin 在窗口创建前被调用，state 变为 Hidden，异步任务会中止。
             // 2. 窗口创建失败时异步任务会把 state 回滚为 Hidden，瞬态自动纠正。
-            // 3. C1 修复（Destroyed handler 校验 get_webview_window）已防止旧窗口的
-            //    Destroyed 事件错误覆盖新窗口的 state。
+            // 3. recreating 标志已防止旧窗口的 Destroyed 事件错误覆盖新窗口的 state。
             // 4. 不引入 Creating 中间态以避免 state 模型扩散到持久化/UI/托盘。
-            crate::registry::REGISTRY
-                .set_state(pin_id, PinState::Visible)
-                .map_err(ShowPinError::Internal)?;
+            // M5：set_state 失败时必须 unmark_recreating，否则标志泄漏。
+            // 泄漏场景：set_state 失败 → show_pin 返回 Err → 旧窗口仍在 → 用户关闭旧窗口
+            //   → Destroyed 触发 → is_recreating=true → 跳过 set_state(Hidden)
+            //   → state 仍为旧值（可能 Visible），管理页不刷新。
+            if let Err(e) = crate::registry::REGISTRY.set_state(pin_id, PinState::Visible) {
+                if had_window {
+                    crate::registry::REGISTRY.unmark_recreating(pin_id);
+                }
+                return Err(ShowPinError::Internal(e));
+            }
             // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
 
             let app = app.clone();
             let pin_id = pin_id.to_string();
             tauri::async_runtime::spawn(async move {
                 if !is_still_visible(&pin_id) {
+                    // 异步任务开始前 state 已被并发 hide 改为 Hidden，
+                    // 但 recreating 标志仍存在（mark 在 set_state 之前）。
+                    // 必须清除，否则旧窗口（若存在）后续 Destroyed 会误判为重建跳过 state 更新。
+                    crate::registry::REGISTRY.unmark_recreating(&pin_id);
                     return;
                 }
 
                 // M-2 修复：cleanup 移入异步任务内部，在 set_state(Visible) 之后执行。
-                // 原先 cleanup 在 set_state 之前调用，Destroyed 事件可能在 set_state 之后
-                // 被处理，把 state 错误设为 Hidden。
-                // 移入异步任务后，cleanup 触发的 Destroyed 事件即使在 create_pin_window 之前
-                // 被处理，create_pin_window 成功后会重新 set_state(Visible) 覆盖误判。
+                // recreating 标志确保 cleanup 触发的 Destroyed 事件跳过 state 更新。
                 if let Err(e) = crate::window::hide_pin_window(&app, &pin_id) {
                     eprintln!("[agent-pin] show_pin cleanup for {}: {}", pin_id, e);
                 }
@@ -166,10 +178,8 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                 }
 
                 // 创建成功后重新 set_state(Visible)。
-                // cleanup 触发的 Destroyed 事件可能把 state 误设为 Hidden，这里覆盖。
-                // 守卫：只在窗口仍存在时才 re-affirm，避免覆盖用户并发 hide 的意图。
-                // - Destroyed 误判（旧窗口销毁、新窗口存在）→ get_webview_window 返回 Some → re-affirm，正确。
-                // - 用户 hide（新窗口被销毁）→ get_webview_window 返回 None → 跳过，保留 Hidden，正确。
+                // cleanup 触发的 Destroyed 事件可能把 state 误设为 Hidden（若 recreating 未生效），
+                // 这里覆盖。守卫：只在窗口仍存在时才 re-affirm，避免覆盖用户并发 hide 的意图。
                 if app.get_webview_window(&pin_id).is_some() {
                     if let Err(e) = crate::registry::REGISTRY.set_state(&pin_id, PinState::Visible)
                     {

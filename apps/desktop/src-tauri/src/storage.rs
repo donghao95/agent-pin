@@ -41,6 +41,16 @@ pub enum PinState {
 
 // ---------- state.json 结构 ----------
 
+/// 用户手动调整后的窗口尺寸（持久化到 state.json）。
+/// show 时优先用此尺寸恢复窗口，而非 doc.window 或默认值。
+/// 仅记录用户主动 resize 后的尺寸，fit_pin_window_height 的自动调整不记录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowSize {
+    pub width: f64,
+    pub height: f64,
+}
+
 /// state.json 中的单条 Pin 元数据。
 /// 用于管理界面列表 + 托盘快恢列表，无需读取 pins/{pinId}.json。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +67,11 @@ pub struct PinMeta {
     /// 与 PinDocument.source 同步：插入时一次性写入，后续不修改。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source: Option<crate::pin::PinSource>,
+    /// 用户手动调整后的窗口尺寸（宽高，逻辑像素）。
+    /// show 时优先用此尺寸恢复窗口。
+    /// None 表示用户未手动调整过，用 doc.window 或默认值。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub window_size: Option<WindowSize>,
 }
 
 /// state.json 整体结构
@@ -453,6 +468,7 @@ mod tests {
                     updated_at: "2026-01-02T00:00:00Z".to_string(),
                     state: PinState::Hidden,
                     source: None,
+                    window_size: None,
                 }],
             };
             save_state_to(root, &state).expect("save should succeed");

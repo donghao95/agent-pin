@@ -10,7 +10,7 @@
 //   应用启动 → spawn_blocking 异步检查（静默）
 //   托盘"检查更新" → 同步检查（弹提示）
 //   有新版 → 返回 latest 版本号 + Release URL
-//   用户点击 → 用 tauri-plugin-shell 打开浏览器到 Release 页
+//   用户点击 → 用 std::process::Command 打开浏览器到 Release 页
 //
 // 缓存：~/.agent-pin/update-cache.json
 //   { "lastCheckedAt": "2026-06-30T12:00:00Z", "latestVersion": "0.1.1" }

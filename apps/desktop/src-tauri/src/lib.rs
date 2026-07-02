@@ -149,11 +149,95 @@ async fn check_for_updates(force: bool) -> Result<updater::UpdateCheckResult, St
         .map_err(|e| format!("join handle: {}", e))?
 }
 
+/// Pin 窗口自适应高度：前端渲染后测量内容高度，通知后端调整窗口高度。
+/// 见 window::fit_pin_window_height 文档。
+/// 校验：pin_id 格式 + content_height 范围 + 窗口必须是 Pin 窗口。
+#[tauri::command]
+fn fit_pin_window_height(
+    app: tauri::AppHandle,
+    pin_id: String,
+    content_height: f64,
+) -> Result<bool, String> {
+    window::fit_pin_window_height(&app, &pin_id, content_height)
+}
+
+/// 关闭 Pin 窗口（正常关闭路径）。
+/// 流程：set_state(Hidden) + emit pins:changed → destroy 窗口。
+///
+/// 与直接调 getCurrentWindow().close() 的区别：
+/// - close() 只触发 Destroyed 事件，state 更新依赖 Destroyed handler（异步、有时序问题）
+/// - close_pin 同步 set_state + emit，管理页立即刷新，不依赖 Destroyed 时序
+///
+/// Destroyed 事件仍会触发，但 state 已是 Hidden，`if meta.state == Visible` 守卫跳过。
+///
+/// 幂等：已 Hidden 且窗口已销毁时返回 Ok（不重复 emit）。若 state==Hidden 但窗口仍在
+///（上次 destroy 失败），仍尝试销毁窗口，让用户能关闭卡住的窗口。
+#[tauri::command]
+fn close_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
+    // m1：入口处校验 pin_id 格式（防路径穿越），与 remove / remember_window_size 一致。
+    crate::storage::validate_pin_id(&pin_id)?;
+    let meta = registry::REGISTRY
+        .get_meta(&pin_id)
+        .ok_or_else(|| format!("pin not found: {}", pin_id))?;
+
+    // 已 Hidden：幂等返回，但若窗口仍在（上次 destroy 失败或窗口卡住）仍尝试销毁。
+    // M2 修复：原实现 state==Hidden 时直接返回 Ok，导致 destroy 失败后窗口卡住、
+    // 用户再点关闭无法关闭（state 已 Hidden 直接 return，窗口永远关不掉）。
+    if meta.state == PinState::Hidden {
+        if app.get_webview_window(&pin_id).is_some() {
+            if let Err(e) = window::hide_pin_window(&app, &pin_id) {
+                eprintln!("[agent-pin] close_pin destroy failed for {}: {}", pin_id, e);
+            }
+        }
+        return Ok(()); // 不重复 emit（state 无变更）
+    }
+
+    // 先 set_state(Hidden) + emit（管理页立即刷新）
+    registry::REGISTRY.set_state(&pin_id, PinState::Hidden)?;
+    // 再销毁窗口（触发 Destroyed，但 state 已 Hidden，handler 跳过）
+    if let Err(e) = window::hide_pin_window(&app, &pin_id) {
+        eprintln!("[agent-pin] close_pin destroy failed for {}: {}", pin_id, e);
+        // 不返回 Err：state 已更新，窗口销毁失败不阻塞（窗口可能已自行关闭）
+    }
+    Ok(())
+}
+
+/// 记录用户手动调整后的窗口尺寸（持久化到 state.json）。
+/// show 时优先用此尺寸恢复窗口。
+/// 仅前端检测到用户手动 resize 后调用，fit_pin_window_height 的自动调整不调用。
+#[tauri::command]
+fn remember_pin_size(pin_id: String, width: f64, height: f64) -> Result<(), String> {
+    registry::REGISTRY.remember_window_size(&pin_id, width, height)
+}
+
+/// 用系统默认浏览器打开外链。
+///
+/// Tauri 2 WebView 中 `<a target="_blank">` 不会自动打开系统浏览器（被 WebView 拦截），
+/// 必须主动拦截链接点击并用 opener plugin 打开。
+///
+/// 安全：协议白名单只允许 http/https/mailto，拒绝 file:// 等危险协议
+///（防 file:// 打开本地文件、javascript: 执行代码等）。
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    // 协议白名单校验：split(':') 取第一个冒号前的部分作为 scheme。
+    // 不用 url crate 是为了零新增依赖；字符串匹配对 URL 协议校验足够健壮
+    //（file://、javascript:、data: 等都会被拒绝）。
+    let scheme = url.split(':').next().unwrap_or("").to_lowercase();
+    match scheme.as_str() {
+        "http" | "https" | "mailto" => {}
+        other => return Err(format!("unsupported url scheme: {}", other)),
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("failed to open url: {}", e))
+}
+
 // ---------- 应用入口 ----------
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // 单实例检查：第二次启动时唤起已有实例（打开管理界面 + 聚焦），然后自身退出。
         // 必须在 setup 之前注册。放在所有 plugin 之后、setup 之前。
@@ -262,6 +346,10 @@ pub fn run() {
             delete_pin,
             open_data_dir,
             check_for_updates,
+            fit_pin_window_height,
+            close_pin,
+            remember_pin_size,
+            open_external_url,
         ])
         .on_window_event(|window, event| {
             // 管理界面窗口关闭按钮：拦截 close，改为 hide（缩回托盘，不 destroy）。
@@ -278,48 +366,42 @@ pub fn run() {
                 }
             }
 
-            // Pin 窗口销毁事件：只在 state=visible 时设 hidden。
-            // 避免与 hide 路由、show 路由清理孤儿窗口、delete_pin 冲突。
-            // 管理界面窗口 label="manager" 已被 CloseRequested 拦截，不会到 Destroyed。
+            // Pin 窗口销毁事件：作为异常兜底，确保窗口被销毁后 state 最终为 hidden。
             //
-            // C1 修复：必须校验当前已无同 label 窗口才设 hidden。
-            // show_pin 在重建窗口时会用同一个 label（pin_id）创建新窗口，
-            // 旧窗口的 Destroyed 事件可能延迟到新窗口创建后才触发，
-            // 此时 get_webview_window(pin_id) 返回 Some（新窗口），
-            // 若直接 set_state(Hidden) 会把新窗口的 state 错误覆盖为 hidden。
+            // 正常关闭路径（ESC / 关闭按钮 / hide_pin 命令）：
+            //   前端 invoke close_pin → set_state(Hidden) + emit + destroy
+            //   → Destroyed 触发时 state 已是 Hidden，下方 `if meta.state == Visible` 守卫跳过。
+            //   → 管理页刷新由 close_pin 的 emit 同步触发，不依赖 Destroyed 时序。
             //
-            // M1 修复（TOCTOU 竞态）：get_webview_window 返回 None 与 set_state(Hidden) 之间
-            // 存在时间窗口，并发 show_pin 可在此间隙创建新窗口并设 Visible，
-            // 随后 set_state(Hidden) 覆盖。修复：set_state(Hidden) 后二次校验窗口是否已重建，
-            // 若是则回滚为 Visible。
+            // 异常销毁路径（窗口崩溃等）：
+            //   Destroyed 触发时 state 仍为 Visible → set_state(Hidden) + emit → 管理页刷新。
+            //
+            // show_pin 重建路径：
+            //   show_pin 在 cleanup 前 mark_recreating(pin_id)。
+            //   cleanup 触发 Destroyed → is_recreating=true → unmark + return（跳过 state 更新）。
+            //   新窗口创建后 set_state(Visible) 不被覆盖。
+            //
+            // 旧方案用 get_webview_window(pin_id).is_some() 判断是否重建，
+            // 但 Tauri 2 Destroyed 触发时窗口可能未从内部管理器注销，返回 Some（正在销毁的窗口本身），
+            // 导致正常关闭也被误判为重建，跳过 set_state(Hidden)，不 emit pins:changed，管理页不刷新。
+            // 新方案用显式 recreating 标志，不依赖 Tauri 内部时序。
             if let tauri::WindowEvent::Destroyed = event {
                 let pin_id = window.label();
                 if pin_id == "manager" {
                     return;
                 }
-                // 校验：当前已无同 label 窗口才认为是真正的"最后一个窗口被关闭"。
-                // 若新窗口已存在（show_pin 重建场景），跳过 state 更新。
-                if window.app_handle().get_webview_window(pin_id).is_some() {
+                // 重建中的 cleanup：跳过 state 更新，清除标志
+                if registry::REGISTRY.is_recreating(pin_id) {
+                    registry::REGISTRY.unmark_recreating(pin_id);
                     return;
                 }
+                // 兜底：窗口异常销毁时确保 state=Hidden（正常关闭时 state 已是 Hidden，守卫跳过）
                 if let Some(meta) = registry::REGISTRY.get_meta(pin_id) {
                     if meta.state == PinState::Visible {
                         if let Err(e) =
                             registry::REGISTRY.set_state(pin_id, PinState::Hidden)
                         {
                             eprintln!("[agent-pin] on_window_event set_state: {}", e);
-                        }
-                        // M1 二次校验：set_state(Hidden) 后再次检查窗口是否已重建。
-                        // 若在 set_state 期间有并发的 show_pin 创建了新窗口，回滚为 Visible。
-                        if window.app_handle().get_webview_window(pin_id).is_some() {
-                            if let Err(e) =
-                                registry::REGISTRY.set_state(pin_id, PinState::Visible)
-                            {
-                                eprintln!(
-                                    "[agent-pin] on_window_event rollback set_state: {}",
-                                    e
-                                );
-                            }
                         }
                         // tray 刷新由 set_state 触发 registry emit "pins:changed" → tray listen 自动处理
                     }
