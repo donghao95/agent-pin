@@ -69,14 +69,14 @@ cargo build --release
 
 ```bash
 agent-pin --json health
-agent-pin --json markdown --title "PR 审查结果" --text "## 结论\n通过"
-agent-pin --json image --title "效果图" --path ./render.png
-agent-pin --json status --title "构建状态" --level success --text "构建通过"
+agent-pin --json push --file ./pin.json
 agent-pin --json list
 agent-pin --json show <pinId>
 agent-pin --json hide <pinId>
 agent-pin --json hide-all
 ```
+
+Agent 自动创建 Pin 时优先使用 `push --file`。`markdown`、`image`、`status` 子命令仍可作为手写调试或用户明确要求时的快捷入口。
 
 完整 CLI 说明见 [docs/04_cli.md](docs/04_cli.md)。
 Agent 使用规则与示例见 [skills/agent-pin/SKILL.md](skills/agent-pin/SKILL.md)。

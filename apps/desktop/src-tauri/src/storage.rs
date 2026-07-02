@@ -139,6 +139,17 @@ pub fn pins_dir() -> PathBuf {
     data_dir().join("pins")
 }
 
+/// 图片托管目录：~/.agent-pin/images/
+pub fn images_dir() -> PathBuf {
+    data_dir().join("images")
+}
+
+/// 在指定 root 下计算图片托管目录路径（测试用）。
+#[allow(dead_code)]
+pub(crate) fn images_dir_for(root: &std::path::Path) -> PathBuf {
+    data_dir_for(root).join("images")
+}
+
 /// 在指定 root 下计算 pins 目录路径（测试用）。
 pub(crate) fn pins_dir_for(root: &std::path::Path) -> PathBuf {
     data_dir_for(root).join("pins")
@@ -164,13 +175,15 @@ pub(crate) fn pin_file_path_for(root: &std::path::Path, pin_id: &str) -> PathBuf
     pins_dir_for(root).join(format!("{}.json", pin_id))
 }
 
-/// 校验 pin_id 格式，防路径穿越和保留 label 滥用（m2）。
+/// 校验 pin_id 格式，白名单与 CLI 对齐（M5/M14）。
 /// pin_id 由 generate_pin_id 生成，格式为 pin_<timestamp>_<6位随机>。
-/// 这里做防御性校验：
-/// - 拒绝空字符串、包含路径分隔符或 `..` 的输入（防路径穿越）
-/// - 拒绝 NUL 字节（%00 解码后），避免文件名截断风险
-/// - 拒绝超长 pin_id（防 HashMap 内存膨胀）
-/// - 拒绝保留 label "manager"（防止通过 Tauri invoke 销毁管理窗口）
+///
+/// 白名单：只允许 ASCII 字母数字、下划线、连字符（与 CLI validate_pin_id 一致）。
+/// 长度上限 128 字符，非空。
+/// 拒绝保留 label "manager"（防止通过 Tauri invoke 销毁管理窗口）。
+///
+/// 白名单比黑名单更安全：黑名单遗漏一个危险字符就可能被利用，
+/// 白名单只允许已知安全字符，#、?、/、\、..、空格、中文等全部拒绝。
 pub fn validate_pin_id(pin_id: &str) -> Result<(), String> {
     if pin_id.is_empty() {
         return Err("pin_id must be non-empty".to_string());
@@ -181,18 +194,18 @@ pub fn validate_pin_id(pin_id: &str) -> Result<(), String> {
             pin_id.len()
         ));
     }
-    if pin_id.contains('/')
-        || pin_id.contains('\\')
-        || pin_id.contains("..")
-        || pin_id.contains('\0')
-    {
-        return Err(format!(
-            "invalid pin_id (path traversal detected): {}",
-            pin_id
-        ));
-    }
     if pin_id == "manager" {
         return Err("pin_id 'manager' is reserved and cannot be used".to_string());
+    }
+    // 白名单：只允许 ASCII 字母数字、下划线、连字符
+    if !pin_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "invalid pin_id (only ASCII alphanumeric, underscore, hyphen allowed): {}",
+            pin_id
+        ));
     }
     Ok(())
 }
@@ -371,8 +384,11 @@ mod tests {
         // 标准 pin_id 格式
         assert!(validate_pin_id("pin_1234567890_000001").is_ok());
         assert!(validate_pin_id("pin_0_999999").is_ok());
-        // 普通的字母数字组合（不要求严格格式，只防路径穿越）
+        // 字母数字+下划线+连字符组合
         assert!(validate_pin_id("abc123").is_ok());
+        assert!(validate_pin_id("pin-ABC_123-xyz").is_ok());
+        assert!(validate_pin_id("a").is_ok());
+        assert!(validate_pin_id("12345").is_ok());
     }
 
     #[test]
@@ -381,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pin_id_path_traversal() {
+    fn test_validate_pin_id_rejects_path_traversal() {
         // 正斜杠
         assert!(validate_pin_id("pin_123/sub").is_err());
         // 反斜杠
@@ -391,6 +407,18 @@ mod tests {
         assert!(validate_pin_id("pin_../../state").is_err());
         // NUL 字节（防 %00 截断）
         assert!(validate_pin_id("pin_123\0evil").is_err());
+    }
+
+    #[test]
+    fn test_validate_pin_id_rejects_special_chars() {
+        // 白名单：只允许 ASCII 字母数字、下划线、连字符
+        assert!(validate_pin_id("pin 123").is_err()); // 空格
+        assert!(validate_pin_id("pin@123").is_err()); // @
+        assert!(validate_pin_id("pin&123").is_err()); // &
+        assert!(validate_pin_id("pin#123").is_err()); // #（URL fragment）
+        assert!(validate_pin_id("pin?123").is_err()); // ?（URL query）
+        assert!(validate_pin_id("pin.123").is_err()); // .（路径遍历组件）
+        assert!(validate_pin_id("pin:123").is_err()); // :
     }
 
     #[test]

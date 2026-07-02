@@ -248,7 +248,12 @@ HTTP 请求体总大小上限为 1 MB（`03_api.md` §4）。
 
 `path` 必须是绝对路径。直接通过 HTTP 测试时需传绝对路径。
 
-CLI 作为 Agent 优先入口会额外做图片托管：`agent-pin image` 和 `agent-pin push` 会先把源图片复制到 `~/.agent-pin/images/`，再把副本绝对路径写入 PinDocument 并 POST。这样 Pin 关闭后恢复或应用重启后，不依赖原始图片文件仍在原位置。
+图片托管（CLI 和 HTTP 统一行为）：
+
+- CLI 作为 Agent 优先入口会提前做图片托管：`agent-pin image` 和 `agent-pin push` 会先把源图片复制到 `~/.agent-pin/images/`，再把副本绝对路径写入 PinDocument 并 POST。
+- HTTP API（`POST /api/pins`）收到 image block 时，如果绝对路径对应的文件存在且扩展名合法，后端会自动复制到 `~/.agent-pin/images/` 并改写 doc 中的路径再持久化和创建窗口。如果文件不存在，保留原路径不动；如果扩展名不合法，请求在 PinDocument 校验阶段返回 `IMAGE_UNSUPPORTED`。
+- 这样无论通过 CLI 还是 HTTP 创建 Pin，可读取的源图片都会托管在 `~/.agent-pin/images/`，不依赖源文件继续留在原位置。
+- `assetProtocol.scope` 已收窄为 `$HOME/.agent-pin/images/**/*`，只允许加载图片托管目录中的文件，不再允许加载系统任意路径或 Agent Pin 元数据。
 
 图片路径不存在时，不应导致应用崩溃，应在 Pin 内显示错误块。
 

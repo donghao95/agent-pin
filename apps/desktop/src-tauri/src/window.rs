@@ -48,8 +48,10 @@ const FIT_HEIGHT_MAX: f64 = 100_000.0;
 /// 记忆尺寸优先的理由：用户手动调整后的尺寸是最贴近用户习惯的，应尊重。
 /// 若用户未调整过（window_size=None），回退到 Agent 配置或默认值。
 pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Result<(), String> {
+    // 校验 pin_id 格式（白名单：ASCII 字母数字、_、-，与 CLI 对齐）
+    validate_pin_id(pin_id)?;
     let label = pin_id.to_string();
-    // URL 只带 pinId，数据走 invoke
+    // URL 只带 pinId，数据走 invoke。pin_id 白名单字符全部 URL 安全，无需 encode。
     let url = format!("index.html?pinId={}", pin_id);
 
     let win_cfg = doc.window.as_ref();

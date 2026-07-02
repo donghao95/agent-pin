@@ -28,16 +28,61 @@ use tauri_plugin_dialog::DialogExt;
 use crate::pin_actions::ShowPinMode;
 use crate::storage::{PinMeta, PinState};
 
+// ---------- invoke 命令权限策略 ----------
+//
+// 最小权限原则（防 WebView XSS 横向攻击）：
+// - 管理类命令（show/hide/hide-all/delete/open_data_dir）：仅 manager 窗口可调用
+// - Pin 自身命令（close/fit/remember）：仅 label==pinId 的 pin 窗口可调用
+// - 数据读取（get_pin_document）：pin 窗口只能读自身，manager 不受限
+// - 列表（list_pins）：仅 manager 窗口可调用
+// - 外链打开（open_external_url）：仅 pin 窗口可调用（manager 不应有外链场景）
+// - 更新检查（check_for_updates）：不限窗口（manager 和托盘共用）
+
+/// 校验调用窗口是否为 manager。
+fn is_manager_label(label: &str) -> bool {
+    label == "manager"
+}
+
+fn is_pin_window_label(label: &str) -> bool {
+    label.starts_with("pin_")
+}
+
+fn is_pin_owner_label(label: &str, pin_id: &str) -> bool {
+    is_pin_window_label(label) && label == pin_id
+}
+
+fn can_read_pin_document(label: &str, pin_id: &str) -> bool {
+    is_manager_label(label) || is_pin_owner_label(label, pin_id)
+}
+
+fn require_manager(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if !is_manager_label(window.label()) {
+        return Err("forbidden: only manager window can call this command".to_string());
+    }
+    Ok(())
+}
+
+/// 校验调用窗口是否为指定 pinId 的 pin 窗口（label 以 pin_ 开头且 == pin_id）。
+fn require_pin_owner(window: &tauri::WebviewWindow, pin_id: &str) -> Result<(), String> {
+    let label = window.label();
+    if !is_pin_owner_label(label, pin_id) {
+        return Err(format!(
+            "forbidden: window '{}' cannot operate on pin '{}'",
+            label, pin_id
+        ));
+    }
+    Ok(())
+}
+
 // ---------- invoke 命令 ----------
 
 /// 前端渲染入口：按 pinId 读取 PinDocument。
 /// 窗口 URL 只带 pinId，数据走这条命令，避免把完整 JSON 塞进 URL。
 /// m5：Pin 窗口（label 以 pin_ 开头）只能读取自身的 PinDocument，
-/// 防止被 XSS 后读取其他 Pin 的内容。manager 窗口不受限。
+/// manager 窗口可读取任意 PinDocument。其他窗口一律拒绝，防未来 WebView 扩展绕过。
 #[tauri::command]
 fn get_pin_document(window: tauri::WebviewWindow, pin_id: String) -> Option<serde_json::Value> {
-    let label = window.label();
-    if label.starts_with("pin_") && label != pin_id {
+    if !can_read_pin_document(window.label(), &pin_id) {
         return None;
     }
     registry::REGISTRY
@@ -46,29 +91,36 @@ fn get_pin_document(window: tauri::WebviewWindow, pin_id: String) -> Option<serd
 }
 
 /// 管理界面：列出所有 Pin 元数据（按 createdAt 降序）。
-/// m5：Pin 窗口（label 以 pin_ 开头，渲染不可信 Agent 内容）不应能枚举所有 Pin。
-/// 仅 manager 窗口可调用，防止 Pin 窗口被 XSS 后泄露全部 Pin 元数据。
+/// m5：仅 manager 窗口可调用，防止 Pin 窗口被 XSS 后泄露全部 Pin 元数据。
 #[tauri::command]
 fn list_pins(window: tauri::WebviewWindow) -> Vec<PinMeta> {
-    if window.label() != "manager" {
+    if require_manager(&window).is_err() {
         return Vec::new();
     }
     registry::REGISTRY.list()
 }
 
 /// 管理界面/托盘：显示 Pin（创建窗口）。
-/// 管理界面从前端 invoke 进入这里。窗口创建会启动新的 WebView，而新 Pin 窗口
-/// 首屏又会 invoke(get_pin_document)。如果在当前 invoke 内同步 build 新窗口，
-/// 会出现管理页卡住、新窗口空白的 IPC 重入问题。这里先返回，再异步创建窗口。
+/// 仅 manager 窗口可调用（管理类命令）。
 #[tauri::command]
-fn show_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
+fn show_pin(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    pin_id: String,
+) -> Result<(), String> {
+    require_manager(&window)?;
     pin_actions::show_pin(&app, &pin_id, ShowPinMode::AsyncCreate).map_err(|e| e.to_string())
 }
 
 /// 管理界面/托盘：隐藏 Pin（destroy 窗口 + state=hidden）。
-/// 幂等：已 hidden 直接返回 Ok。
+/// 仅 manager 窗口可调用（管理类命令）。幂等：已 hidden 直接返回 Ok。
 #[tauri::command]
-fn hide_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
+fn hide_pin(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    pin_id: String,
+) -> Result<(), String> {
+    require_manager(&window)?;
     let meta = registry::REGISTRY
         .get_meta(&pin_id)
         .ok_or_else(|| format!("pin not found: {}", pin_id))?;
@@ -85,9 +137,11 @@ fn hide_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
 }
 
 /// 管理界面/托盘：隐藏所有可见 Pin。
+/// 仅 manager 窗口可调用（管理类命令）。
 /// M10 修复：复用 pin_actions::hide_all_visible，消除三份拷贝。
 #[tauri::command]
-fn hide_all_pins(app: tauri::AppHandle) -> Result<(), String> {
+fn hide_all_pins(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+    require_manager(&window)?;
     let failed = pin_actions::hide_all_visible(&app);
     if failed.is_empty() {
         Ok(())
@@ -101,13 +155,16 @@ fn hide_all_pins(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 管理界面：删除 Pin（不可恢复）。
+/// 仅 manager 窗口可调用（管理类命令）。
 /// C1 修复：先校验 pin_id 存在于 registry，再销毁窗口。
-/// 原实现先销毁窗口再查 registry，可被滥用销毁非 Pin 窗口（如 manager），
-/// 导致用户失去管理入口（DoS）。现在严格按"先查再销"顺序。
-/// M3 修复：窗口销毁失败不静默吞错，直接返回 Err，避免留下孤儿窗口
-/// （窗口仍存在但 registry 已无记录，无法通过 API 隐藏）。
+/// M3 修复：窗口销毁失败不静默吞错，直接返回 Err。
 #[tauri::command]
-fn delete_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
+fn delete_pin(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    pin_id: String,
+) -> Result<(), String> {
+    require_manager(&window)?;
     // 1. 先校验 pin_id 存在性（防销毁 manager 等非 Pin 窗口）
     registry::REGISTRY
         .get_meta(&pin_id)
@@ -121,10 +178,10 @@ fn delete_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
 }
 
 /// 管理界面：打开数据目录（跨平台）。
-/// Windows: explorer；macOS: open；Linux: xdg-open。
-/// 用 std::process::Command 而非 shell plugin，避免 scope 配置复杂度。
+/// 仅 manager 窗口可调用（管理类命令）。
 #[tauri::command]
-fn open_data_dir() -> Result<(), String> {
+fn open_data_dir(window: tauri::WebviewWindow) -> Result<(), String> {
+    require_manager(&window)?;
     let dir = storage::data_dir();
     #[cfg(target_os = "windows")]
     let cmd = "explorer";
@@ -140,6 +197,7 @@ fn open_data_dir() -> Result<(), String> {
 }
 
 /// 检查更新：调 GitHub API 查最新 release，与当前版本对比。
+/// 不限窗口（manager 和托盘共用）。
 /// force=true 时跳过 24h 缓存强制请求。
 /// 失败返回 Err（前端/托盘决定是否提示）。
 #[tauri::command]
@@ -150,30 +208,32 @@ async fn check_for_updates(force: bool) -> Result<updater::UpdateCheckResult, St
 }
 
 /// Pin 窗口自适应高度：前端渲染后测量内容高度，通知后端调整窗口高度。
+/// 仅 pin 窗口可调用（label == pin_id）。
 /// 见 window::fit_pin_window_height 文档。
-/// 校验：pin_id 格式 + content_height 范围 + 窗口必须是 Pin 窗口。
 #[tauri::command]
 fn fit_pin_window_height(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     pin_id: String,
     content_height: f64,
 ) -> Result<bool, String> {
+    require_pin_owner(&window, &pin_id)?;
     window::fit_pin_window_height(&app, &pin_id, content_height)
 }
 
 /// 关闭 Pin 窗口（正常关闭路径）。
+/// 仅 pin 窗口可调用（label == pin_id）。
 /// 流程：set_state(Hidden) + emit pins:changed → destroy 窗口。
-///
-/// 与直接调 getCurrentWindow().close() 的区别：
-/// - close() 只触发 Destroyed 事件，state 更新依赖 Destroyed handler（异步、有时序问题）
-/// - close_pin 同步 set_state + emit，管理页立即刷新，不依赖 Destroyed 时序
-///
-/// Destroyed 事件仍会触发，但 state 已是 Hidden，`if meta.state == Visible` 守卫跳过。
 ///
 /// 幂等：已 Hidden 且窗口已销毁时返回 Ok（不重复 emit）。若 state==Hidden 但窗口仍在
 ///（上次 destroy 失败），仍尝试销毁窗口，让用户能关闭卡住的窗口。
 #[tauri::command]
-fn close_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
+fn close_pin(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    pin_id: String,
+) -> Result<(), String> {
+    require_pin_owner(&window, &pin_id)?;
     // m1：入口处校验 pin_id 格式（防路径穿越），与 remove / remember_window_size 一致。
     crate::storage::validate_pin_id(&pin_id)?;
     let meta = registry::REGISTRY
@@ -181,8 +241,6 @@ fn close_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
         .ok_or_else(|| format!("pin not found: {}", pin_id))?;
 
     // 已 Hidden：幂等返回，但若窗口仍在（上次 destroy 失败或窗口卡住）仍尝试销毁。
-    // M2 修复：原实现 state==Hidden 时直接返回 Ok，导致 destroy 失败后窗口卡住、
-    // 用户再点关闭无法关闭（state 已 Hidden 直接 return，窗口永远关不掉）。
     if meta.state == PinState::Hidden {
         if app.get_webview_window(&pin_id).is_some() {
             if let Err(e) = window::hide_pin_window(&app, &pin_id) {
@@ -203,14 +261,22 @@ fn close_pin(app: tauri::AppHandle, pin_id: String) -> Result<(), String> {
 }
 
 /// 记录用户手动调整后的窗口尺寸（持久化到 state.json）。
+/// 仅 pin 窗口可调用（label == pin_id）。
 /// show 时优先用此尺寸恢复窗口。
 /// 仅前端检测到用户手动 resize 后调用，fit_pin_window_height 的自动调整不调用。
 #[tauri::command]
-fn remember_pin_size(pin_id: String, width: f64, height: f64) -> Result<(), String> {
+fn remember_pin_size(
+    window: tauri::WebviewWindow,
+    pin_id: String,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    require_pin_owner(&window, &pin_id)?;
     registry::REGISTRY.remember_window_size(&pin_id, width, height)
 }
 
 /// 用系统默认浏览器打开外链。
+/// 仅 pin 窗口可调用（manager 不应有外链场景）。
 ///
 /// Tauri 2 WebView 中 `<a target="_blank">` 不会自动打开系统浏览器（被 WebView 拦截），
 /// 必须主动拦截链接点击并用 opener plugin 打开。
@@ -218,11 +284,17 @@ fn remember_pin_size(pin_id: String, width: f64, height: f64) -> Result<(), Stri
 /// 安全：协议白名单只允许 http/https/mailto，拒绝 file:// 等危险协议
 ///（防 file:// 打开本地文件、javascript: 执行代码等）。
 #[tauri::command]
-fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+fn open_external_url(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<(), String> {
+    // 仅 pin 窗口可调用
+    if !is_pin_window_label(window.label()) {
+        return Err("forbidden: only pin windows can open external urls".to_string());
+    }
     use tauri_plugin_opener::OpenerExt;
-    // 协议白名单校验：split(':') 取第一个冒号前的部分作为 scheme。
-    // 不用 url crate 是为了零新增依赖；字符串匹配对 URL 协议校验足够健壮
-    //（file://、javascript:、data: 等都会被拒绝）。
+    // 协议白名单校验
     let scheme = url.split(':').next().unwrap_or("").to_lowercase();
     match scheme.as_str() {
         "http" | "https" | "mailto" => {}
@@ -411,4 +483,47 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ---------- invoke 权限测试 ----------
+
+#[cfg(test)]
+mod tests {
+    use super::{can_read_pin_document, is_manager_label, is_pin_owner_label, is_pin_window_label};
+
+    #[test]
+    fn test_manager_label_check() {
+        assert!(is_manager_label("manager"));
+        assert!(!is_manager_label("pin_123_000001"));
+        assert!(!is_manager_label("other"));
+        assert!(!is_manager_label(""));
+    }
+
+    #[test]
+    fn test_pin_owner_label_check() {
+        assert!(is_pin_owner_label("pin_123_000001", "pin_123_000001"));
+        // label 不以 pin_ 开头
+        assert!(!is_pin_owner_label("manager", "pin_123_000001"));
+        // label != pin_id
+        assert!(!is_pin_owner_label("pin_123_000001", "pin_456_000001"));
+        // label 不以 pin_ 开头但内容匹配（不应通过）
+        assert!(!is_pin_owner_label("pinx_123_000001", "pinx_123_000001"));
+    }
+
+    #[test]
+    fn test_open_external_url_requires_pin_window() {
+        assert!(is_pin_window_label("pin_123_000001"));
+        assert!(!is_pin_window_label("manager"));
+        assert!(!is_pin_window_label("other"));
+    }
+
+    #[test]
+    fn test_get_pin_document_permission_check() {
+        assert!(can_read_pin_document("manager", "pin_123_000001"));
+        assert!(can_read_pin_document("pin_123_000001", "pin_123_000001"));
+        assert!(!can_read_pin_document("pin_123_000001", "pin_456_000001"));
+        assert!(!can_read_pin_document("settings", "pin_123_000001"));
+        assert!(!can_read_pin_document("plugin", "pin_123_000001"));
+        assert!(!can_read_pin_document("", "pin_123_000001"));
+    }
 }

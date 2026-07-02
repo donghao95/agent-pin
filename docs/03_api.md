@@ -79,7 +79,7 @@ INTERNAL_ERROR
 
 Phase：1
 
-用于 CLI 和调试检查桌面应用是否启动。
+用于 CLI 和调试检查桌面应用是否启动。Host 头白名单校验适用（见 §4）。
 
 请求：
 
@@ -114,7 +114,7 @@ Content-Type: application/json
 
 **Content-Type 强制要求**：所有 POST 请求必须携带 `Content-Type: application/json`（charset 可选），否则返回 415 + `INVALID_JSON`。这是 CSRF 防护的一部分，阻止浏览器跨站简单 POST。
 
-**Host 头白名单**：所有 POST 请求的 `Host` 头必须为 `127.0.0.1:4317` 或 `localhost:4317`，否则返回 403 + `INTERNAL_ERROR`。这是 CSRF 防御纵深，防 DNS rebinding 攻击。
+**Host 头白名单**：所有 `/api` 请求（GET 和 POST）的 `Host` 头必须为本地回环地址（`127.0.0.1`、`localhost` 或 `[::1]`），端口号不限，否则返回 403 + `INTERNAL_ERROR`。这是 CSRF 防御纵深，防 DNS rebinding 攻击。支持 CLI `--endpoint` 自定义本地端口调试。
 
 请求体大小上限：1 MB。
 
@@ -342,10 +342,11 @@ POST /api/pins/hide-all
 - `blocks` 必须存在且至少一个 block
 - block type 必须是 `markdown`、`image` 或 `status`（未知 type 在反序列化阶段被拒绝，返回 `INVALID_JSON`）
 - markdown block 的 `content` 必须非空
-- image block 的 `path` 必须非空且为绝对路径（相对路径解析和图片托管由 CLI 处理）
+- image block 的 `path` 必须非空且为绝对路径（相对路径解析由 CLI 处理；HTTP 后端会托管存在且扩展名合法的绝对路径图片）
 - image block 的 `path` 扩展名必须是 PNG/JPG/JPEG/WebP/GIF 之一（否则 `IMAGE_UNSUPPORTED`）
-- image block 的文件存在性不校验：desktop 不知道 Agent cwd，前端 `<img>` onerror 显示错误块
-- 通过 CLI 创建 image/mixed Pin 时，CLI 会先校验源图片存在并复制到 `~/.agent-pin/images/`，再 POST 副本绝对路径；直接调用 HTTP API 时调用方自行保证路径稳定性
+- image block 的文件存在性不校验（不阻塞 POST）：如果文件存在且扩展名合法，后端自动复制到 `~/.agent-pin/images/` 并改写 doc 中的路径再持久化；如果文件不存在，保留原路径，前端 `<img>` onerror 显示错误块；如果文件存在但托管失败，返回 500 + `INTERNAL_ERROR`，不创建 Pin
+- 通过 CLI 创建 image/mixed Pin 时，CLI 会先校验源图片存在并复制到 `~/.agent-pin/images/`，再 POST 副本绝对路径
+- `assetProtocol.scope` 已收窄为 `$HOME/.agent-pin/images/**/*`，只允许加载图片托管目录中的文件
 - status block 的 `text` 必须非空
 - status block 的 `level` 若存在，必须是 `info`/`success`/`warning`/`error` 之一
 - `window.width` 若存在，必须在 `280..=100_000` 范围内（与窗口 `min_inner_size` 对齐，小于 280 返回 `INVALID_PIN_DOCUMENT`）
@@ -358,6 +359,8 @@ POST /api/pins/hide-all
 MVP 仅本地使用：
 
 - 只监听 `127.0.0.1`
+- 所有 `/api` 请求校验 Host 头为本地回环地址（`127.0.0.1`、`localhost`、`[::1]`，端口不限），防 DNS rebinding
+- POST 请求额外校验 `Content-Type: application/json`，防 CSRF
 - 不做公网/局域网访问
 - 不做账号和权限
 - 不做鉴权 token
