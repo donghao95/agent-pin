@@ -22,11 +22,10 @@ use crate::storage::validate_pin_id;
 
 /// 默认窗口宽度
 const DEFAULT_WIDTH: f64 = 420.0;
-/// 默认窗口高度（会在屏幕高度的 70% 内限制）
-const DEFAULT_HEIGHT: f64 = 600.0;
-/// height="auto" 时的初始保守高度。
-/// 选 200px 而非 600px：避免内容很少时出现"大窗口→缩小"的视觉跳变。
+/// 默认初始窗口高度（height="auto" 行为，spec §9.2 规定的默认值）。
+/// 选 200px 而非更大的值：避免内容很少时出现"大窗口→缩小"的视觉跳变。
 /// 前端渲染后会通过 fit_pin_window_height 回流到实际内容高度。
+/// 当 doc.window 为 None（CLI 默认场景）或 height 未指定时，等价于 height: "auto"。
 const AUTO_INITIAL_HEIGHT: f64 = 200.0;
 /// 级联偏移量（每个新窗口相对上一个偏移 24px）
 const CASCADE_OFFSET: f64 = 24.0;
@@ -43,10 +42,12 @@ const FIT_HEIGHT_MAX: f64 = 100_000.0;
 /// 尺寸优先级（高 → 低）：
 /// 1. 用户记忆尺寸（PinMeta.window_size，用户手动 resize 后持久化）
 /// 2. PinDocument.window 配置（Agent 通过 API/CLI 指定）
-/// 3. 默认值（DEFAULT_WIDTH × DEFAULT_HEIGHT，或 auto 时 AUTO_INITIAL_HEIGHT）
+/// 3. 默认值（DEFAULT_WIDTH × AUTO_INITIAL_HEIGHT，等价于 height: "auto"）
 ///
 /// 记忆尺寸优先的理由：用户手动调整后的尺寸是最贴近用户习惯的，应尊重。
 /// 若用户未调整过（window_size=None），回退到 Agent 配置或默认值。
+/// 默认值用 AUTO_INITIAL_HEIGHT(200) 而非更大的值：spec §9.2 规定默认等价于
+/// height: "auto"，避免内容很少时出现"大窗口→缩小"的视觉跳变。
 pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Result<(), String> {
     // 校验 pin_id 格式（白名单：ASCII 字母数字、_、-，与 CLI 对齐）
     validate_pin_id(pin_id)?;
@@ -69,8 +70,9 @@ pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Re
         .or_else(|| win_cfg.and_then(|w| w.width).map(|w| w as f64))
         .unwrap_or(DEFAULT_WIDTH);
 
-    // height 优先级：记忆 > doc.window > 默认
-    // 记忆尺寸直接用（用户已确认过这个高度）；doc.window 的 auto 用保守初始高度
+    // height 优先级：记忆 > doc.window > 默认(AUTO_INITIAL_HEIGHT，等价于 height: "auto")
+    // 记忆尺寸直接用（用户已确认过这个高度）；doc.window 的 auto 用保守初始高度；
+    // 无 win_cfg 或 win_cfg.height 未指定时也用 AUTO_INITIAL_HEIGHT（spec §9.2 默认等价于 auto）。
     let requested_height = remembered
         .as_ref()
         .map(|s| s.height)
@@ -80,7 +82,7 @@ pub fn create_pin_window(app: &AppHandle, pin_id: &str, doc: &PinDocument) -> Re
                 PinHeight::Auto(_) => AUTO_INITIAL_HEIGHT,
             })
         })
-        .unwrap_or(DEFAULT_HEIGHT);
+        .unwrap_or(AUTO_INITIAL_HEIGHT);
 
     // M8 修复：在 build 之前 clamp 高度，避免 build 后 set_size 产生闪烁。
     // M9 修复：primary_monitor 统一用 get_screen_size 辅助函数处理 None。

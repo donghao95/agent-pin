@@ -86,7 +86,7 @@ MVP 边界：select-mode 只读，永不支持修改 Pin 内容并保存（见 `
 
 1. 用户记忆尺寸（`PinMeta.window_size`）
 2. `PinDocument.window` 配置（Agent 通过 API/CLI 指定）
-3. 默认值（420 × 600，`height: "auto"` 时初始 200px）
+3. 默认值（420 × auto，初始 200px，等价于 `height: "auto"` 行为）
 
 自动适配与记忆的协调：
 
