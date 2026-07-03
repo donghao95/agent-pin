@@ -27,7 +27,7 @@ use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::pin_actions::ShowPinMode;
-use crate::storage::{PinMeta, PinState};
+use crate::storage::PinState;
 
 // ---------- invoke 命令权限策略 ----------
 //
@@ -560,7 +560,7 @@ pub fn run() {
                         }
                         // set_state 已 emit pins:changed（tray 刷新），
                         // 额外 emit manager:snapshot 让 Manager 列表同步
-                        manager_snapshot::emit_manager_snapshot(&window.app_handle());
+                        manager_snapshot::emit_manager_snapshot(window.app_handle());
                     }
                 }
                 // entry 不存在（已被 delete_pin remove）：忽略
