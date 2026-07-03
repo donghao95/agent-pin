@@ -54,9 +54,7 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                 if meta.state != PinState::Visible {
                     // M6 修复：set_state 失败时窗口已 show，需 hide 窗口回滚，
                     // 避免"窗口可见但 state=hidden"的不一致。
-                    if let Err(e) =
-                        crate::registry::REGISTRY.set_state(pin_id, PinState::Visible)
-                    {
+                    if let Err(e) = crate::registry::REGISTRY.set_state(pin_id, PinState::Visible) {
                         if let Err(hide_err) = crate::window::hide_pin_window(app, pin_id) {
                             eprintln!(
                                 "[agent-pin] show_pin rollback hide failed for {}: {}",
@@ -71,7 +69,10 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                 // AsyncCreate 模式下额外 emit pin:show-ready 让 Manager 退出 opening（M1 修复）
                 if matches!(mode, ShowPinMode::AsyncCreate) {
                     if let Err(emit_err) = app.emit("pin:show-ready", pin_id) {
-                        eprintln!("[agent-pin] emit pin:show-ready failed for {}: {}", pin_id, emit_err);
+                        eprintln!(
+                            "[agent-pin] emit pin:show-ready failed for {}: {}",
+                            pin_id, emit_err
+                        );
                     }
                 }
                 crate::manager_snapshot::emit_manager_snapshot(app);
@@ -198,7 +199,10 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                             crate::registry::REGISTRY.unmark_recreating(&pin_id);
                         }
                         if let Err(emit_err) = app.emit("pin:show-ready", &pin_id) {
-                            eprintln!("[agent-pin] emit pin:show-ready failed for {}: {}", pin_id, emit_err);
+                            eprintln!(
+                                "[agent-pin] emit pin:show-ready failed for {}: {}",
+                                pin_id, emit_err
+                            );
                         }
                         crate::manager_snapshot::emit_manager_snapshot(&app);
                         return;
@@ -224,7 +228,10 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                         "pin:show-failed",
                         serde_json::json!({ "pinId": pin_id, "message": e }),
                     ) {
-                        eprintln!("[agent-pin] emit pin:show-failed failed for {}: {}", pin_id, emit_err);
+                        eprintln!(
+                            "[agent-pin] emit pin:show-failed failed for {}: {}",
+                            pin_id, emit_err
+                        );
                     }
                     // Manager 同步：推 snapshot（state=Hidden），让 Manager 退出 opening 显示 hidden
                     crate::manager_snapshot::emit_manager_snapshot(&app);
@@ -266,7 +273,10 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                 // emit pin:show-ready 让 Manager 退出 opening 临时态（M1/M2/M3/M4 修复）
                 // 边界：manager:snapshot 只负责 setPins，pin:show-ready/show-failed 负责结束 opening
                 if let Err(emit_err) = app.emit("pin:show-ready", &pin_id) {
-                    eprintln!("[agent-pin] emit pin:show-ready failed for {}: {}", pin_id, emit_err);
+                    eprintln!(
+                        "[agent-pin] emit pin:show-ready failed for {}: {}",
+                        pin_id, emit_err
+                    );
                 }
                 crate::manager_snapshot::emit_manager_snapshot(&app);
             });
