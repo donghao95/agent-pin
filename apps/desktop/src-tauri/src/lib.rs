@@ -14,6 +14,7 @@
 // - 托盘 Quit = 退出应用 + 停止 HTTP
 
 mod http;
+mod manager_snapshot;
 mod pin;
 mod pin_actions;
 mod registry;
@@ -26,7 +27,7 @@ use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::pin_actions::ShowPinMode;
-use crate::storage::{PinMeta, PinState};
+use crate::storage::PinState;
 
 // ---------- invoke 命令权限策略 ----------
 //
@@ -90,14 +91,14 @@ fn get_pin_document(window: tauri::WebviewWindow, pin_id: String) -> Option<serd
         .and_then(|doc| serde_json::to_value(doc).ok())
 }
 
-/// 管理界面：列出所有 Pin 元数据（按 createdAt 降序）。
-/// m5：仅 manager 窗口可调用，防止 Pin 窗口被 XSS 后泄露全部 Pin 元数据。
+/// 管理界面：获取 ManagerSnapshot（Manager 列表权威数据源）。
+/// 仅 manager 窗口可调用。用于 mount/focus 时的主动拉取，配合 manager:snapshot 推送。
 #[tauri::command]
-fn list_pins(window: tauri::WebviewWindow) -> Vec<PinMeta> {
-    if require_manager(&window).is_err() {
-        return Vec::new();
-    }
-    registry::REGISTRY.list()
+fn get_manager_snapshot(
+    window: tauri::WebviewWindow,
+) -> Result<manager_snapshot::ManagerSnapshot, String> {
+    require_manager(&window)?;
+    Ok(manager_snapshot::build())
 }
 
 /// 管理界面/托盘：显示 Pin（创建窗口）。
@@ -113,38 +114,80 @@ fn show_pin(
 }
 
 /// 管理界面/托盘：隐藏 Pin（destroy 窗口 + state=hidden）。
-/// 仅 manager 窗口可调用（管理类命令）。幂等：已 hidden 直接返回 Ok。
+/// 仅 manager 窗口可调用（管理类命令）。
+///
+/// 流程与 close_pin 一致（M-1/M-2 修复）：
+/// - state=Hidden 但窗口仍在：仍尝试销毁（兜底卡住的窗口）
+/// - 先 set_state_quiet(Hidden) → destroy → 成功统一 emit；失败检查窗口是否存在再决定回滚
+///
+/// 返回 ManagerSnapshot：前端直接 applySnapshot。
 #[tauri::command]
 fn hide_pin(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     pin_id: String,
-) -> Result<(), String> {
+) -> Result<manager_snapshot::ManagerSnapshot, String> {
     require_manager(&window)?;
     let meta = registry::REGISTRY
         .get_meta(&pin_id)
         .ok_or_else(|| format!("pin not found: {}", pin_id))?;
 
+    // M-1 修复：state=Hidden 但窗口仍在时仍尝试销毁（与 close_pin 一致）
     if meta.state == PinState::Hidden {
-        return Ok(()); // 幂等
+        if app.get_webview_window(&pin_id).is_some() {
+            let _ = window::hide_pin_window(&app, &pin_id);
+        }
+        return Ok(manager_snapshot::build());
     }
 
-    // M2 修复：窗口销毁失败不静默吞掉，直接返回 Err
-    window::hide_pin_window(&app, &pin_id)?;
-    registry::REGISTRY.set_state(&pin_id, PinState::Hidden)?;
-    // tray 刷新由 set_state 触发 registry emit "pins:changed" → tray listen 自动处理
-    Ok(())
+    // M-2 修复：先 set_state_quiet(Hidden) → 后 destroy（与 close_pin 一致）
+    // destroy 失败时检查窗口是否存在再决定回滚，避免 Destroyed 异步竞态
+    registry::REGISTRY.set_state_quiet(&pin_id, PinState::Hidden)?;
+    match window::hide_pin_window(&app, &pin_id) {
+        Ok(()) => {
+            registry::emit_changed();
+            manager_snapshot::emit_manager_snapshot(&app);
+        }
+        Err(e) => {
+            let window_still_exists = app.get_webview_window(&pin_id).is_some();
+            eprintln!(
+                "[agent-pin] hide_pin destroy failed for {}: {} (window_still_exists={})",
+                pin_id, e, window_still_exists
+            );
+            if window_still_exists {
+                if let Err(rollback_err) =
+                    registry::REGISTRY.set_state_quiet(&pin_id, PinState::Visible)
+                {
+                    eprintln!(
+                        "[agent-pin] hide_pin rollback state failed for {}: {}",
+                        pin_id, rollback_err
+                    );
+                }
+            }
+            registry::emit_changed();
+            manager_snapshot::emit_manager_snapshot(&app);
+            return Err(format!("failed to hide pin window: {}", e));
+        }
+    }
+    Ok(manager_snapshot::build())
 }
 
 /// 管理界面/托盘：隐藏所有可见 Pin。
 /// 仅 manager 窗口可调用（管理类命令）。
 /// M10 修复：复用 pin_actions::hide_all_visible，消除三份拷贝。
+///
+/// 返回 ManagerSnapshot：前端直接 applySnapshot。
 #[tauri::command]
-fn hide_all_pins(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+fn hide_all_pins(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<manager_snapshot::ManagerSnapshot, String> {
     require_manager(&window)?;
     let failed = pin_actions::hide_all_visible(&app);
+    // hide_all_visible 已统一 emit pins:changed，额外 emit manager:snapshot
+    manager_snapshot::emit_manager_snapshot(&app);
     if failed.is_empty() {
-        Ok(())
+        Ok(manager_snapshot::build())
     } else {
         Err(format!(
             "failed to hide {} pin(s): {}",
@@ -158,12 +201,14 @@ fn hide_all_pins(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<
 /// 仅 manager 窗口可调用（管理类命令）。
 /// C1 修复：先校验 pin_id 存在于 registry，再销毁窗口。
 /// M3 修复：窗口销毁失败不静默吞错，直接返回 Err。
+///
+/// 返回 ManagerSnapshot：前端直接 applySnapshot。
 #[tauri::command]
 fn delete_pin(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     pin_id: String,
-) -> Result<(), String> {
+) -> Result<manager_snapshot::ManagerSnapshot, String> {
     require_manager(&window)?;
     // 1. 先校验 pin_id 存在性（防销毁 manager 等非 Pin 窗口）
     registry::REGISTRY
@@ -171,10 +216,11 @@ fn delete_pin(
         .ok_or_else(|| format!("pin not found: {}", pin_id))?;
     // 2. 销毁窗口（失败直接返回 Err，不静默吞错）
     window::hide_pin_window(&app, &pin_id)?;
-    // 3. 删除 registry entry + 文件 + state
+    // 3. 删除 registry entry + 文件 + state（remove 内部 emit pins:changed）
     registry::REGISTRY.remove(&pin_id)?;
-    // tray 刷新由 remove 触发 registry emit "pins:changed" → tray listen 自动处理
-    Ok(())
+    // 额外 emit manager:snapshot 让 Manager 列表同步
+    manager_snapshot::emit_manager_snapshot(&app);
+    Ok(manager_snapshot::build())
 }
 
 /// 管理界面：打开数据目录（跨平台）。
@@ -221,12 +267,18 @@ fn fit_pin_window_height(
     window::fit_pin_window_height(&app, &pin_id, content_height)
 }
 
-/// 关闭 Pin 窗口（正常关闭路径）。
+/// 关闭 Pin 窗口（正常关闭路径，由 Pin 窗口 ESC / 关闭按钮触发）。
 /// 仅 pin 窗口可调用（label == pin_id）。
-/// 流程：set_state(Hidden) + emit pins:changed → destroy 窗口。
+///
+/// 流程：set_state_quiet(Hidden) → destroy 窗口 → 成功统一 emit；失败回滚 state。
+///
+/// 时序设计（第一性原理）：
+/// - 用 quiet 版本先改 state，不立即 emit，避免在 destroy 完成前把中间态推给 Manager
+/// - destroy 成功后统一 emit（pins:changed 给 tray + manager:snapshot 给 Manager）
+/// - destroy 失败则 set_state_quiet(Visible) 回滚 + emit，让用户知道关闭失败，不假装 hidden
 ///
 /// 幂等：已 Hidden 且窗口已销毁时返回 Ok（不重复 emit）。若 state==Hidden 但窗口仍在
-///（上次 destroy 失败），仍尝试销毁窗口，让用户能关闭卡住的窗口。
+///（上次 destroy 失败或窗口卡住），仍尝试销毁窗口，让用户能关闭卡住的窗口。
 #[tauri::command]
 fn close_pin(
     window: tauri::WebviewWindow,
@@ -250,12 +302,43 @@ fn close_pin(
         return Ok(()); // 不重复 emit（state 无变更）
     }
 
-    // 先 set_state(Hidden) + emit（管理页立即刷新）
-    registry::REGISTRY.set_state(&pin_id, PinState::Hidden)?;
+    // 先 quiet 改 state=Hidden（不 emit，避免 destroy 完成前推中间态）
+    registry::REGISTRY.set_state_quiet(&pin_id, PinState::Hidden)?;
     // 再销毁窗口（触发 Destroyed，但 state 已 Hidden，handler 跳过）
-    if let Err(e) = window::hide_pin_window(&app, &pin_id) {
-        eprintln!("[agent-pin] close_pin destroy failed for {}: {}", pin_id, e);
-        // 不返回 Err：state 已更新，窗口销毁失败不阻塞（窗口可能已自行关闭）
+    match window::hide_pin_window(&app, &pin_id) {
+        Ok(()) => {
+            // destroy 成功：统一 emit（tray 用 pins:changed，Manager 用 manager:snapshot）
+            registry::emit_changed();
+            manager_snapshot::emit_manager_snapshot(&app);
+        }
+        Err(e) => {
+            // M7 修复：destroy 失败时检查窗口是否真的还在，避免 Destroyed 异步竞态。
+            // - 窗口还在（get_webview_window 返回 Some）：回滚 Visible，让用户知道关闭失败可重试。
+            //   此时 Destroyed 不会触发（窗口没销毁），state=Visible 一致。
+            // - 窗口不在（get_webview_window 返回 None）：维持 Hidden，不回滚。
+            //   窗口已销毁，Destroyed 可能已触发或即将触发，维持 Hidden 与窗口事实一致。
+            //   若回滚 Visible，Destroyed handler 看到 state=Visible 会 set_state(Hidden)，
+            //   导致中间态 snapshot 错误（先推 visible 再推 hidden）。
+            let window_still_exists = app.get_webview_window(&pin_id).is_some();
+            eprintln!(
+                "[agent-pin] close_pin destroy failed for {}: {} (window_still_exists={})",
+                pin_id, e, window_still_exists
+            );
+            if window_still_exists {
+                if let Err(rollback_err) =
+                    registry::REGISTRY.set_state_quiet(&pin_id, PinState::Visible)
+                {
+                    eprintln!(
+                        "[agent-pin] close_pin rollback state failed for {}: {}",
+                        pin_id, rollback_err
+                    );
+                }
+            }
+            // state 已是正确值（窗口在→Visible，窗口不在→Hidden），统一 emit
+            registry::emit_changed();
+            manager_snapshot::emit_manager_snapshot(&app);
+            return Err(format!("failed to close pin window: {}", e));
+        }
     }
     Ok(())
 }
@@ -411,7 +494,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_pin_document,
-            list_pins,
+            get_manager_snapshot,
             show_pin,
             hide_pin,
             hide_all_pins,
@@ -475,7 +558,9 @@ pub fn run() {
                         {
                             eprintln!("[agent-pin] on_window_event set_state: {}", e);
                         }
-                        // tray 刷新由 set_state 触发 registry emit "pins:changed" → tray listen 自动处理
+                        // set_state 已 emit pins:changed（tray 刷新），
+                        // 额外 emit manager:snapshot 让 Manager 列表同步
+                        manager_snapshot::emit_manager_snapshot(window.app_handle());
                     }
                 }
                 // entry 不存在（已被 delete_pin remove）：忽略

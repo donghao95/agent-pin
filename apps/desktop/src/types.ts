@@ -56,3 +56,16 @@ export type PinMeta = {
   state: PinState;
   source?: PinSource;
 };
+
+// ---------- Manager 快照（后端 manager_snapshot.rs 对齐）----------
+
+/// Manager 列表权威快照。后端状态变化后推送，前端直接 setPins，不再二次 invoke。
+export type ManagerSnapshot = {
+  pins: PinMeta[];
+};
+
+/// Manager 前端临时操作态（不持久化，仅 UI 表达过渡过程）。
+/// - opening：用户点了"显示"，窗口异步创建中
+/// - closing：用户点了"隐藏"，窗口销毁中
+/// - deleting：用户点了"删除"，registry 移除中
+export type TransientState = "opening" | "closing" | "deleting";

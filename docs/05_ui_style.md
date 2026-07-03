@@ -134,7 +134,7 @@ Pin 窗口应满足：
 - 用户手动 resize 后尺寸记忆，重新打开恢复原样，最小 280×100 不受内容影响。
 - 内容溢出时底部渐变透明暗示，滚动到底部后渐变消失。
 - 双击进入只读模式，可选中文本复制，ESC 退出。右击弹出上下文菜单（只读模式 / 隐藏 Pin），不出现原生网页菜单。
-- ESC 关闭后管理页列表立即刷新（同步 state=hidden + pins:changed 事件）。
+- ESC 关闭后管理页列表立即刷新（`set_state_quiet(hidden)` → destroy → 统一 emit `pins:changed` + `manager:snapshot`）。
 - 移动/缩放时的边缘闪烁属已知限制，不阻塞验收。
 
 ## 7. 管理界面窗口（Phase 2-B）
@@ -152,7 +152,8 @@ Phase 2-B 引入独立的管理界面窗口（`?manager=1`），与 Pin 窗口�
 - 浅色主题，与 Pin 窗口风格呼应（都是"轻、克制"的桌面工具感）。
 - 顶部 header：标题 + 统计（共/可见/隐藏/异常）+ 搜索框 + 工具按钮（刷新/隐藏全部/打开数据目录）。
 - 列表区：PinCard 卡片式排列，每张卡片显示状态图标 + 标题 + 时间 + agent/workspace 标签 + 显示/隐藏/删除按钮。
-- 状态图标：visible=●（实心圆）、hidden=○（空心圆）、failed=✕。
+- 状态图标：visible=●（实心圆）、hidden=○（空心圆）、failed=✕、opening=◐、closing=◑、deleting=⌫。
+- 临时态标签（opening/closing/deleting）用琥珀色 tag 显示"显示中…/隐藏中…/删除中…"，操作完成后自动消失。
 - 删除操作前 `window.confirm` 二次确认。
 - 错误消息以可点击关闭的提示条展示，不阻塞列表操作。
 
