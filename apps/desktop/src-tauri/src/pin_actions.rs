@@ -52,11 +52,29 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                 // 已 visible 且窗口 show 成功时跳过冗余的 set_state + refresh
                 // （set_state 会写 state.json，无变更时不应触发 I/O）
                 if meta.state != PinState::Visible {
-                    crate::registry::REGISTRY
-                        .set_state(pin_id, PinState::Visible)
-                        .map_err(ShowPinError::Internal)?;
+                    // M6 修复：set_state 失败时窗口已 show，需 hide 窗口回滚，
+                    // 避免"窗口可见但 state=hidden"的不一致。
+                    if let Err(e) =
+                        crate::registry::REGISTRY.set_state(pin_id, PinState::Visible)
+                    {
+                        if let Err(hide_err) = crate::window::hide_pin_window(app, pin_id) {
+                            eprintln!(
+                                "[agent-pin] show_pin rollback hide failed for {}: {}",
+                                pin_id, hide_err
+                            );
+                        }
+                        return Err(ShowPinError::Internal(e));
+                    }
                     // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
                 }
+                // Manager 同步：推 snapshot（set_state 只 emit pins:changed 给 tray，不推 manager:snapshot）
+                // AsyncCreate 模式下额外 emit pin:show-ready 让 Manager 退出 opening（M1 修复）
+                if matches!(mode, ShowPinMode::AsyncCreate) {
+                    if let Err(emit_err) = app.emit("pin:show-ready", pin_id) {
+                        eprintln!("[agent-pin] emit pin:show-ready failed for {}: {}", pin_id, emit_err);
+                    }
+                }
+                crate::manager_snapshot::emit_manager_snapshot(app);
                 return Ok(());
             }
             Err(e) => {
@@ -102,8 +120,13 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
             if let Err(e) = crate::window::hide_pin_window(app, pin_id) {
                 eprintln!("[agent-pin] show_pin cleanup for {}: {}", pin_id, e);
             }
-            crate::window::create_pin_window(app, pin_id, &doc)
-                .map_err(ShowPinError::WindowCreate)?;
+            if let Err(e) = crate::window::create_pin_window(app, pin_id, &doc) {
+                // m-2 修复：create 失败时 unmark_recreating，避免标志泄漏
+                if had_window {
+                    crate::registry::REGISTRY.unmark_recreating(pin_id);
+                }
+                return Err(ShowPinError::WindowCreate(e));
+            }
             if let Err(e) = crate::registry::REGISTRY.set_state(pin_id, PinState::Visible) {
                 if let Err(destroy_err) = crate::window::hide_pin_window(app, pin_id) {
                     eprintln!(
@@ -114,6 +137,8 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                 return Err(ShowPinError::Internal(e));
             }
             // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
+            // Manager 同步：推 snapshot
+            crate::manager_snapshot::emit_manager_snapshot(app);
         }
         ShowPinMode::AsyncCreate => {
             // C2 说明：此处先设 state=Visible 再异步创建窗口，存在短暂"state=Visible 但窗口不存在"
@@ -123,6 +148,9 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
             // 2. 窗口创建失败时异步任务会把 state 回滚为 Hidden，瞬态自动纠正。
             // 3. recreating 标志已防止旧窗口的 Destroyed 事件错误覆盖新窗口的 state。
             // 4. 不引入 Creating 中间态以避免 state 模型扩散到持久化/UI/托盘。
+            // 5. Manager 前端用 opening 临时态覆盖此瞬态：set_state(Visible) 只 emit pins:changed
+            //    （给 tray），不 emit manager:snapshot，所以 Manager 不会在窗口创建完成前显示 visible。
+            //    创建成功后才 emit_manager_snapshot → Manager 退出 opening 显示 visible。
             // M5：set_state 失败时必须 unmark_recreating，否则标志泄漏。
             // 泄漏场景：set_state 失败 → show_pin 返回 Err → 旧窗口仍在 → 用户关闭旧窗口
             //   → Destroyed 触发 → is_recreating=true → 跳过 set_state(Hidden)
@@ -134,6 +162,7 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                 return Err(ShowPinError::Internal(e));
             }
             // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
+            // 注意：此处不 emit manager:snapshot，Manager 保持 opening 临时态
 
             let app = app.clone();
             let pin_id = pin_id.to_string();
@@ -143,6 +172,14 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                     // 但 recreating 标志仍存在（mark 在 set_state 之前）。
                     // 必须清除，否则旧窗口（若存在）后续 Destroyed 会误判为重建跳过 state 更新。
                     crate::registry::REGISTRY.unmark_recreating(&pin_id);
+                    // state 已是 Hidden（由 hide_pin 设置），推 snapshot + show-failed 让 Manager 退出 opening
+                    if let Err(emit_err) = app.emit(
+                        "pin:show-failed",
+                        serde_json::json!({ "pinId": pin_id, "message": "cancelled by concurrent hide" }),
+                    ) {
+                        eprintln!("[agent-pin] emit pin:show-failed failed for {}: {}", pin_id, emit_err);
+                    }
+                    crate::manager_snapshot::emit_manager_snapshot(&app);
                     return;
                 }
 
@@ -154,11 +191,24 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
 
                 if let Err(e) = crate::window::create_pin_window(&app, &pin_id, &doc) {
                     if app.get_webview_window(&pin_id).is_some() && is_still_visible(&pin_id) {
-                        // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
+                        // 创建失败但窗口存在且仍应 visible：可能是并发创建成功，视为成功
+                        // emit pin:show-ready 让 Manager 退出 opening（M1/M3 修复）
+                        // m-2：unmark_recreating（幂等，若已由 Destroyed 清除则无操作）
+                        if had_window {
+                            crate::registry::REGISTRY.unmark_recreating(&pin_id);
+                        }
+                        if let Err(emit_err) = app.emit("pin:show-ready", &pin_id) {
+                            eprintln!("[agent-pin] emit pin:show-ready failed for {}: {}", pin_id, emit_err);
+                        }
+                        crate::manager_snapshot::emit_manager_snapshot(&app);
                         return;
                     }
 
                     eprintln!("[agent-pin] show_pin create window for {}: {}", pin_id, e);
+                    // m-2：create 失败时 unmark_recreating，避免标志泄漏
+                    if had_window {
+                        crate::registry::REGISTRY.unmark_recreating(&pin_id);
+                    }
                     if let Err(state_err) =
                         crate::registry::REGISTRY.set_state(&pin_id, PinState::Hidden)
                     {
@@ -170,14 +220,36 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                     // m3：AsyncCreate 模式下 show_pin 已立即返回 Ok，
                     // 窗口异步创建失败时通过事件通知前端（Manager.tsx 监听）。
                     // tray 刷新由 set_state(Hidden) 触发 registry emit 自动处理
-                    let _ = app.emit(
+                    if let Err(emit_err) = app.emit(
                         "pin:show-failed",
                         serde_json::json!({ "pinId": pin_id, "message": e }),
-                    );
+                    ) {
+                        eprintln!("[agent-pin] emit pin:show-failed failed for {}: {}", pin_id, emit_err);
+                    }
+                    // Manager 同步：推 snapshot（state=Hidden），让 Manager 退出 opening 显示 hidden
+                    crate::manager_snapshot::emit_manager_snapshot(&app);
                     return;
                 }
 
-                // 创建成功后重新 set_state(Visible)。
+                // 创建成功后，必须再次检查 state 是否仍应 visible。
+                // 并发场景：用户在窗口创建期间点了隐藏 → hide_pin 已 set_state(Hidden)。
+                // 此时不能 re-affirm Visible，否则会覆盖用户的隐藏意图（C2 并发 bug 修复）。
+                if !is_still_visible(&pin_id) {
+                    // 用户已隐藏：销毁刚创建的窗口，state 已是 Hidden（由 hide_pin 设置）
+                    let _ = crate::window::hide_pin_window(&app, &pin_id);
+                    crate::registry::REGISTRY.unmark_recreating(&pin_id);
+                    // 已隐藏：emit pin:show-failed 让 Manager 退出 opening（M3 修复）
+                    if let Err(emit_err) = app.emit(
+                        "pin:show-failed",
+                        serde_json::json!({ "pinId": pin_id, "message": "cancelled by concurrent hide" }),
+                    ) {
+                        eprintln!("[agent-pin] emit pin:show-failed failed for {}: {}", pin_id, emit_err);
+                    }
+                    crate::manager_snapshot::emit_manager_snapshot(&app);
+                    return;
+                }
+
+                // 仍应 visible：re-affirm set_state(Visible)。
                 // cleanup 触发的 Destroyed 事件可能把 state 误设为 Hidden（若 recreating 未生效），
                 // 这里覆盖。守卫：只在窗口仍存在时才 re-affirm，避免覆盖用户并发 hide 的意图。
                 if app.get_webview_window(&pin_id).is_some() {
@@ -190,6 +262,13 @@ pub fn show_pin(app: &AppHandle, pin_id: &str, mode: ShowPinMode) -> Result<(), 
                     }
                 }
                 // tray 刷新由 registry emit "pins:changed" → tray listen 自动处理
+                // Manager 同步：推 snapshot（state=Visible）
+                // emit pin:show-ready 让 Manager 退出 opening 临时态（M1/M2/M3/M4 修复）
+                // 边界：manager:snapshot 只负责 setPins，pin:show-ready/show-failed 负责结束 opening
+                if let Err(emit_err) = app.emit("pin:show-ready", &pin_id) {
+                    eprintln!("[agent-pin] emit pin:show-ready failed for {}: {}", pin_id, emit_err);
+                }
+                crate::manager_snapshot::emit_manager_snapshot(&app);
             });
         }
     }

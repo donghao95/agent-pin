@@ -256,6 +256,19 @@
   color: #991b1b;
 }
 
+/* 临时操作态标签（opening/closing/deleting）*/
+.pin-card-tag-transient {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* 临时态状态点颜色 */
+.pin-card-state-opening,
+.pin-card-state-closing,
+.pin-card-state-deleting {
+  opacity: 0.6;
+}
+
 .pin-card-actions {
   flex-shrink: 0;
   display: flex;

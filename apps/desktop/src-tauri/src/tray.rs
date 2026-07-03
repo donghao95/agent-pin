@@ -227,6 +227,9 @@ pub fn open_manager_window(app: &AppHandle) -> tauri::Result<()> {
         if let Err(e) = existing.set_focus() {
             eprintln!("[agent-pin] manager focus existing: {}", e);
         }
+        // Manager 重新可见时推送 snapshot：兜底 hidden 期间错过的状态变化
+        // （Tauri 2 hidden 窗口事件投递不保证实时，show 时主动推一次确保一致）
+        crate::manager_snapshot::emit_manager_snapshot(app);
         return Ok(());
     }
     WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html?manager=1".into()))
@@ -238,6 +241,7 @@ pub fn open_manager_window(app: &AppHandle) -> tauri::Result<()> {
         .resizable(true)
         .visible(true)
         .build()?;
+    // 新建窗口：前端 mount 时会主动 invoke get_manager_snapshot，无需后端推
     Ok(())
 }
 

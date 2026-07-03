@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use std::path::Path as FsPath;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::pin::{PinBlock, PinErrorCode};
@@ -246,7 +246,9 @@ async fn create_pin(
         ));
     }
 
-    // 5. pins:changed 事件由 registry::insert 内部 emit，管理界面和托盘自动刷新
+    // 5. pins:changed 事件由 registry::insert 内部 emit（tray 刷新），
+    //    额外 emit manager:snapshot 让 Manager 列表同步（若 Manager 已打开）
+    crate::manager_snapshot::emit_manager_snapshot(&app);
 
     Ok(Json(json!({ "ok": true, "pinId": pin_id })))
 }
@@ -296,17 +298,41 @@ async fn hide_pin(
         }
     };
 
-    // 2. 幂等：已 hidden 直接返回 ok
+    // 2. M-1 修复：state=Hidden 但窗口仍在时仍尝试销毁（与 close_pin 一致）
     if meta.state == PinState::Hidden {
+        if app.get_webview_window(&pin_id).is_some() {
+            let _ = crate::window::hide_pin_window(&app, &pin_id);
+        }
         return Ok(Json(json!({ "ok": true })));
     }
 
-    // 3. 销毁窗口（如果存在）。
-    //    M2 修复：窗口销毁失败不再静默吞掉。若窗口存在但 destroy 失败，
-    //    窗口仍可见，此时设 state=hidden 会导致内存与实际不一致。
-    //    返回 500 让调用方知道窗口未被关闭，可重试。
-    //    窗口不存在（幂等 Ok）不触发此分支。
+    // 3. M-2 修复：先 set_state_quiet(Hidden) → 后 destroy（与 close_pin 一致）
+    //    destroy 失败时检查窗口是否存在再决定回滚，避免 Destroyed 异步竞态
+    if let Err(e) = crate::registry::REGISTRY.set_state_quiet(&pin_id, PinState::Hidden) {
+        return Err(err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            PinErrorCode::InternalError,
+            e,
+        ));
+    }
     if let Err(e) = crate::window::hide_pin_window(&app, &pin_id) {
+        let window_still_exists = app.get_webview_window(&pin_id).is_some();
+        eprintln!(
+            "[agent-pin] http hide_pin destroy failed for {}: {} (window_still_exists={})",
+            pin_id, e, window_still_exists
+        );
+        if window_still_exists {
+            if let Err(rollback_err) =
+                crate::registry::REGISTRY.set_state_quiet(&pin_id, PinState::Visible)
+            {
+                eprintln!(
+                    "[agent-pin] http hide_pin rollback state failed for {}: {}",
+                    pin_id, rollback_err
+                );
+            }
+        }
+        crate::registry::emit_changed();
+        crate::manager_snapshot::emit_manager_snapshot(&app);
         return Err(err_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             PinErrorCode::InternalError,
@@ -314,16 +340,9 @@ async fn hide_pin(
         ));
     }
 
-    // 4. 设状态 hidden
-    if let Err(e) = crate::registry::REGISTRY.set_state(&pin_id, PinState::Hidden) {
-        return Err(err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            PinErrorCode::InternalError,
-            e,
-        ));
-    }
-
-    // 5. tray 刷新由 set_state(Hidden) 触发 registry emit "pins:changed" → tray listen 自动处理
+    // 4. 成功：统一 emit（tray 用 pins:changed，Manager 用 manager:snapshot）
+    crate::registry::emit_changed();
+    crate::manager_snapshot::emit_manager_snapshot(&app);
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -336,6 +355,8 @@ async fn hide_all_pins(
     State(app): State<AppHandle>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let failed = crate::pin_actions::hide_all_visible(&app);
+    // hide_all_visible 已 emit pins:changed，额外 emit manager:snapshot
+    crate::manager_snapshot::emit_manager_snapshot(&app);
     if failed.is_empty() {
         Ok(Json(json!({ "ok": true })))
     } else {

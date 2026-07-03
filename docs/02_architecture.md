@@ -218,7 +218,7 @@ Phase 2-B 有三套入口触发 Pin 状态变更，它们的状态更新和事�
 | HTTP `/api/pins/{pinId}/hide` | `set_state(hidden)` | registry emit `pins:changed` | |
 | HTTP `/api/pins/hide-all` | 遍历 visible 逐个 `set_state_quiet(hidden)`，循环结束统一 emit 一次 | registry emit `pins:changed` ×1 | 批量用 quiet 避免 N 次托盘重建 |
 | invoke `show_pin` / `hide_pin` / `hide_all_pins` / `delete_pin` | 同 HTTP 对应路由 | 同 HTTP 对应路由 | 管理界面按钮触发 |
-| invoke `close_pin`（ESC / 关闭按钮） | 同步 `set_state(hidden)` + emit + destroy 窗口 | registry emit `pins:changed` | 不依赖 Destroyed 时序，管理页立即刷新 |
+| invoke `close_pin`（ESC / 关闭按钮） | `set_state_quiet(hidden)` → destroy 窗口 → 成功统一 emit；destroy 失败检查窗口是否存在再决定回滚 | registry emit `pins:changed` + `manager:snapshot` | 不依赖 Destroyed 时序，管理页立即刷新 |
 | invoke `remember_pin_size` | 更新 `PinMeta.window_size` + 持久化 | 无（纯数据更新，不影响列表） | 用户手动 resize 后 300ms 防抖调用 |
 | 托盘快恢菜单点击 | `show_pin_by_id` 内 `set_state(visible)`，失败回滚 | registry emit `pins:changed` | |
 | `WindowEvent::Destroyed`（异常兜底） | `on_window_event` 检测：`is_recreating` → 跳过；state==visible → `set_state(hidden)` | registry emit `pins:changed` | 正常关闭时 state 已是 hidden（close_pin 已处理），守卫跳过 |
@@ -233,14 +233,16 @@ Phase 2-B 有三套入口触发 Pin 状态变更，它们的状态更新和事�
 前端 invoke close_pin(pinId)
   ↓
 后端 close_pin 命令（同步）：
-  - 若 state 已 hidden，幂等返回 Ok
-  - set_state(hidden) → state.json 更新 + registry emit pins:changed
+  - 若 state 已 hidden，幂等返回 Ok（若窗口仍在则尝试销毁）
+  - set_state_quiet(hidden)（不 emit，避免 destroy 完成前推中间态）
   - hide_pin_window（destroy 窗口）
+  - destroy 成功：统一 emit pins:changed + manager:snapshot
+  - destroy 失败：检查窗口是否存在再决定回滚（窗口在→Visible，窗口不在→Hidden）
   ↓
 Destroyed 事件触发：state 已 hidden → 守卫跳过（不重复 emit）
   ↓
-管理界面 listen 收到 pins:changed → 立即刷新列表
-托盘 listen 收到事件 → refresh() 重建菜单（该 Pin 进入最近 5 hidden 列表）
+管理界面 listen 收到 manager:snapshot → 立即刷新列表
+托盘 listen 收到 pins:changed → refresh() 重建菜单（该 Pin 进入最近 5 hidden 列表）
   ↓
 管理界面仍保留记录
 
@@ -248,7 +250,7 @@ Destroyed 事件触发：state 已 hidden → 守卫跳过（不重复 emit）
   ↓
 Destroyed 事件触发：is_recreating=false 且 state==visible
   ↓
-on_window_event 兜底 set_state(hidden) + emit pins:changed
+on_window_event 兜底 set_state(hidden) + emit pins:changed + manager:snapshot
   ↓
 管理界面/托盘刷新
 ```
@@ -296,8 +298,22 @@ Pin 状态变更后需要通知所有视图（托盘菜单、管理界面列表�
 
 | 事件名 | 载荷 | 触发时机 | 订阅者 |
 |--------|------|---------|--------|
-| `pins:changed` | `()`（无载荷） | registry `insert` / `set_state` / `remove` 成功后 | 托盘（refresh 重建菜单）、管理界面（refresh 刷新列表） |
-| `pin:show-failed` | `{ pinId: string, message: string }` | `show_pin` AsyncCreate 模式下窗口异步创建失败时 | 管理界面（显示错误 + refresh） |
+| `pins:changed` | `()`（无载荷） | registry `insert` / `set_state` / `remove` 成功后 | 托盘（refresh 重建菜单） |
+| `manager:snapshot` | `ManagerSnapshot { pins: PinMeta[] }` | 状态变更后向 manager 窗口推送（`emit_to("manager", ...)`） | 管理界面（`setPins` 更新列表） |
+| `pin:show-ready` | `pinId: string` | `show_pin` AsyncCreate 模式下窗口异步创建成功时 | 管理界面（清 `opening` 临时态） |
+| `pin:show-failed` | `{ pinId: string, message: string }` | `show_pin` AsyncCreate 模式下窗口异步创建失败 / 并发取消时 | 管理界面（清 `opening` + 显示错误） |
+
+#### manager:snapshot 边界规则（重要）
+
+`manager:snapshot` 只负责同步 `pins` 数据（`setPins`），**不负责清 `opening` 临时态**。
+
+原因：AsyncCreate 期间，前端可能因 focus / mount / 别的 Pin 变化收到 snapshot。此时 registry 可能已是 `visible`（pre-set），但窗口还没创建完。若此时清 opening，会回到"列表显示 visible 但窗口没出现"的撒谎问题。
+
+边界划分：
+- `manager:snapshot` → 只 `setPins`
+- `pin:show-ready` / `pin:show-failed` → 结束 `opening` 临时态
+
+操作命令（`hide` / `delete` / `hideAll`）返回 `ManagerSnapshot`，前端 invoke 返回后直接 `applySnapshot` + 清 busy。`show_pin` 特殊：命令只返回 ack（`Result<(), String>`），最终状态靠 `pin:show-ready` / `pin:show-failed` + `manager:snapshot` 推送。
 
 #### registry 事件 API
 
@@ -318,9 +334,22 @@ registry 的 `insert` / `set_state_inner` / `remove` 在 emit 前必须 `drop(in
 
 `set_app_handle()` 必须在 `load_from_disk()` 之前调用（lib.rs setup 第一步）。原因：`load_from_disk` 不 emit 事件（启动时无订阅者），但后续的 `insert`/`set_state`/`remove` 需要 AppHandle 来 emit。若 `set_app_handle` 在 `load_from_disk` 之后，`load_from_disk` 内部若有未来改动触发 emit，APP_HANDLE 为 None 会静默跳过。
 
-#### 管理界面 debounce
+#### 管理界面同步机制（推模型）
 
-Manager.tsx 对 `pins:changed` 监听加 50ms debounce：50ms 内多次 emit 只 refresh 一次。防御批量操作或短时间内多个状态变更（如连续创建多个 Pin）触发多次列表刷新。
+管理界面采用推模型：后端状态变更后 `emit_to("manager", "manager:snapshot", snapshot)`，前端 listen 收到后直接 `setPins`，不再二次 invoke `list_pins`。
+
+主动拉取场景（mount / focus / 错误恢复）：invoke `get_manager_snapshot` 命令，用 `requestSeqRef` 丢弃过时响应（并发竞态防护）。
+
+focus 事件加 50ms debounce：Manager 窗口 hide→show 时不 remount，focus 事件作为兜底拉取最新 snapshot，防快速连续触发。
+
+#### 临时态（opening / closing / deleting）
+
+前端用 `Map<pinId, TransientState>` 跟踪操作中的 Pin：
+- `opening`：用户点"显示"，等 `pin:show-ready` / `pin:show-failed` 结束
+- `closing`：用户点"隐藏"，invoke 返回后清
+- `deleting`：用户点"删除"，invoke 返回后清
+
+`displayState` 优先级：临时态 > `registry.state`。opening 期间即使收到 snapshot（state 可能 visible），仍显示 opening，避免撒谎。
 
 ---
 
